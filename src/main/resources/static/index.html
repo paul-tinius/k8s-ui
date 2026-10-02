@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Kubernetes Dashboard</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="gate" class="gate hidden">
+    <form id="gate-form" class="gate-card">
+      <h1>Kubernetes Dashboard</h1>
+      <p>This server expects an access token. It stays in this browser tab.</p>
+      <label for="gate-token">Access token</label>
+      <input id="gate-token" type="password" autocomplete="current-password" required>
+      <button type="submit">Unlock</button>
+      <p id="gate-error" class="error"></p>
+    </form>
+  </div>
+  <div class="app">
+    <header class="top">
+      <div class="brand">
+        <img src="favicon.svg" alt="" width="28" height="28">
+        <div>
+          <strong>Kubernetes Dashboard</strong>
+          <span>Local multi-cluster</span>
+        </div>
+      </div>
+      <label class="cluster-pick">
+        <span>Cluster</span>
+        <select id="cluster"></select>
+      </label>
+      <label class="search">
+        <span>Search</span>
+        <input id="query" type="search" placeholder="Name, label, status, image" autocomplete="off">
+      </label>
+      <label class="live">
+        <input id="live" type="checkbox" checked>
+        Live
+      </label>
+      <div class="top-actions">
+        <button type="button" id="apply-open">Apply YAML</button>
+        <button type="button" id="clusters-open">Clusters</button>
+      </div>
+    </header>
+    <div class="refine">
+      <label>Label <input id="label" placeholder="app=storefront" autocomplete="off"></label>
+      <label>Image <input id="image" placeholder="grafana/agent" autocomplete="off"></label>
+      <label>Node <input id="node" placeholder="node-a" autocomplete="off"></label>
+      <span id="counts"></span>
+      <span id="notice" class="notice"></span>
+    </div>
+    <div class="body">
+      <aside class="namespaces">
+        <div class="aside-head">
+          <h2>Namespaces</h2>
+          <button type="button" id="ns-all">All</button>
+        </div>
+        <div id="namespace-list"></div>
+      </aside>
+      <main>
+        <nav class="tabs" id="tabs">
+          <button type="button" data-tab="overview">Overview</button>
+          <button type="button" data-tab="pods">Pods</button>
+          <button type="button" data-tab="deployments">Deployments</button>
+          <button type="button" data-tab="services">Services</button>
+          <button type="button" data-tab="configmaps">ConfigMaps</button>
+          <button type="button" data-tab="nodes">Nodes</button>
+          <button type="button" data-tab="events">Events</button>
+          <button type="button" data-tab="logs">Logs</button>
+          <button type="button" data-tab="forwards">Port forward</button>
+          <button type="button" data-tab="assist">Assist</button>
+        </nav>
+        <section id="view"></section>
+      </main>
+      <aside id="detail" class="detail">
+        <p class="muted">Select a resource to see its manifest and actions.</p>
+      </aside>
+    </div>
+  </div>
+  <div id="modal" class="modal hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

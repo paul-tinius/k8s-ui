@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-dashboard
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8s-dashboard
+  namespace: k8s-dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-dashboard
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "namespaces", "nodes", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["get", "create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8s-dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8s-dashboard
+subjects:
+  - kind: ServiceAccount
+    name: k8s-dashboard
+    namespace: k8s-dashboard
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-dashboard
+  namespace: k8s-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8s-dashboard
+  template:
+    metadata:
+      labels:
+        app: k8s-dashboard
+    spec:
+      serviceAccountName: k8s-dashboard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dashboard
+          image: k8s-dashboard:1.0.0-SNAPSHOT
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: DASHBOARD_CLUSTER_IN_CLUSTER
+              value: "true"
+            - name: DASHBOARD_CLUSTER_DEMO_ENABLED
+              value: "false"
+            - name: DASHBOARD_CLUSTER_LOAD_DEFAULT_KUBECONFIG
+              value: "false"
+            - name: DASHBOARD_CLUSTER_DATA_DIR
+              value: /data
+            - name: DASHBOARD_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: k8s-dashboard
+                  key: token
+                  optional: true
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: k8s-dashboard
+                  key: xai-api-key
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-dashboard
+  namespace: k8s-dashboard
+spec:
+  selector:
+    app: k8s-dashboard
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -1,0 +1,119 @@
+package com.paultinius.k8s.dashboard.cluster;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class DemoClusterTest {
+
+    private DemoCluster cluster;
+
+    @BeforeEach
+    void setUp() {
+        cluster = new DemoCluster();
+    }
+
+    @Test
+    void list_twoNamespaces_returnsPodsFromBothAndOmitsTheThird() {
+        var pods = cluster.list(ResourceKind.POD, Set.of("shop", "payments"));
+
+        assertThat(pods).extracting(pod -> pod.namespace())
+                .contains("shop", "payments")
+                .doesNotContain("observability");
+        assertThat(pods).filteredOn(pod -> "ledger-a".equals(pod.name()))
+                .singleElement()
+                .extracting(pod -> pod.status())
+                .isEqualTo("CrashLoopBackOff");
+    }
+
+    @Test
+    void logs_connectionRefusedQuery_returnsTheDatabaseLine() {
+        var page = cluster.logs(new LogRequest(Set.of("payments"), "", "", "", 100, "refused"));
+
+        assertThat(page.lines()).anyMatch(line ->
+                line.pod().equals("ledger-a") && line.text().contains("db.payments.svc:5432"));
+        assertThat(page.lines()).noneMatch(line -> line.namespace().equals("shop"));
+    }
+
+    @Test
+    void scale_cartToOne_leavesASingleReadyPod() {
+        cluster.scale("shop", "cart", 1);
+
+        var pods = cluster.list(ResourceKind.POD, Set.of("shop")).stream()
+                .filter(pod -> "cart".equals(pod.labels().get("app")))
+                .toList();
+        assertThat(pods).hasSize(1);
+        assertThat(cluster.detail(ResourceKind.DEPLOYMENT, "shop", "cart").resource().desired()).isEqualTo(1);
+
+        cluster.scale("shop", "cart", 2);
+    }
+
+    @Test
+    void deletePod_ownedStorefrontPod_recreatesARunningPod() {
+        cluster.deletePod("shop", "storefront-a");
+
+        var pods = cluster.list(ResourceKind.POD, Set.of("shop")).stream()
+                .filter(pod -> "storefront".equals(pod.labels().get("app")))
+                .toList();
+        assertThat(pods).hasSize(3);
+        assertThat(pods).extracting(pod -> pod.name()).doesNotContain("storefront-a");
+        assertThat(pods).allMatch(pod -> "Running".equals(pod.status()));
+    }
+
+    @Test
+    void rolloutRestart_storefront_replacesPodNamesAndStaysAvailable() {
+        var before = cluster.list(ResourceKind.POD, Set.of("shop")).stream()
+                .filter(pod -> "storefront".equals(pod.labels().get("app")))
+                .map(pod -> pod.name())
+                .toList();
+
+        cluster.rolloutRestart("shop", "storefront");
+
+        var after = cluster.list(ResourceKind.POD, Set.of("shop")).stream()
+                .filter(pod -> "storefront".equals(pod.labels().get("app")))
+                .toList();
+        assertThat(after).hasSize(before.size());
+        assertThat(after).extracting(pod -> pod.name()).doesNotContainAnyElementsOf(before);
+        assertThat(cluster.detail(ResourceKind.DEPLOYMENT, "shop", "storefront").resource().status()).isEqualTo("Available");
+    }
+
+    @Test
+    void applyYaml_configMap_appearsInTheNamespace() {
+        cluster.applyYaml("""
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: feature-flags
+                  namespace: shop
+                data:
+                  checkout: "on"
+                """);
+
+        assertThat(cluster.list(ResourceKind.CONFIG_MAP, Set.of("shop")))
+                .extracting(configMap -> configMap.name())
+                .contains("feature-flags");
+        assertThat(cluster.detail(ResourceKind.CONFIG_MAP, "shop", "feature-flags").yaml()).contains("checkout");
+    }
+
+    @Test
+    void openForward_service_recordsASimulatedForwardToAReadyPod() {
+        var forward = cluster.openForward("shop", "service", "storefront", 8080, 0).view();
+
+        assertThat(forward.simulated()).isTrue();
+        assertThat(forward.podName()).startsWith("storefront-");
+        assertThat(forward.remotePort()).isEqualTo(8080);
+        assertThat(forward.localPort()).isGreaterThan(0);
+    }
+
+    @Test
+    void overview_paymentsNamespace_countsTheWarningAndUnreadyPod() {
+        var overview = cluster.overview(Set.of("payments"));
+
+        assertThat(overview.warnings()).isEqualTo(1);
+        assertThat(overview.readyPods()).isLessThan(overview.pods());
+        assertThat(overview.attention()).anyMatch(item -> "ledger-a".equals(item.name()));
+    }
+}

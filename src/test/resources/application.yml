@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: k8s-dashboard
+
+server:
+  port: 0
+
+management:
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+dashboard:
+  auth:
+    token: ""
+  cluster:
+    demo-enabled: true
+    load-default-kubeconfig: false
+    in-cluster: false
+    data-dir: ${java.io.tmpdir}/k8s-dashboard-test
+    kubeconfigs: []
+  ai:
+    provider: xAI
+    base-url: https://api.x.ai/v1
+    model: grok-4.7
+    api-key: ""
+    timeout: 5s
+  live:
+    resource-interval: 1h
+    log-interval: 1h
