@@ -19,7 +19,7 @@ java -jar build/libs/k8s-dashboard.jar
 
 The JAR is the only runtime dependency. Java 17 runs it.
 
-Your `~/.kube/config` is loaded when it exists. Each context is a cluster. Paste or upload another kubeconfig in **Clusters**. Files are written to `~/.k8s-dashboard/clusters` with user-only permissions.
+Your `~/.kube/config` is loaded when it exists. Each context is a cluster. Paste or upload another kubeconfig in **Management**. Files are written to `~/.k8s-dashboard/clusters` with user-only permissions.
 
 | Setting | Environment variable | Default |
 | --- | --- | --- |
@@ -45,7 +45,9 @@ Your `~/.kube/config` is loaded when it exists. Each context is a cluster. Paste
 - Tail logs across the pods in the selected namespaces, or one deployment, pod, and container. Search and tail length are server-side.
 - Port-forward a pod, or a service (the first ready pod that matches its selector). On the demo cluster this is recorded and no socket is opened. On a live cluster the port listens on the machine running the dashboard.
 - Live refresh uses a server-sent event stream. The switch in the header pauses it.
+- Theme follows the system appearance, or stays dark or light. The choice is kept in this browser.
 - Assist sends the selected manifest and recent logs to the provider entered in the Assist tab. With no base URL or API key it runs a local check and does not call out.
+- Management creates and deletes namespaces, edits and deletes pods, deployments, services, and config maps, and adds, selects, or removes kubeconfigs. Saving an edit applies that manifest. `default`, `kube-system`, `kube-public`, and `kube-node-lease` cannot be deleted. Deleting a namespace removes everything in it. A deleted pod owned by a deployment is replaced.
 
 Enter a provider name, base URL, and API key in **Assist**. A model name is optional; a blank model uses `dashboard.ai.model` (`grok-4.7` unless `DASHBOARD_AI_MODEL` is set). Those fields stay in this browser's `localStorage` and are sent only with Ask. Leave them blank for a local check. Ask does not use the server API key.
 
@@ -105,7 +107,7 @@ kubectl apply -f deploy/kubernetes/dashboard.yaml
 kubectl -n k8s-dashboard port-forward svc/k8s-dashboard 8080:8080
 ```
 
-The manifest uses the pod service account (`DASHBOARD_CLUSTER_IN_CLUSTER=true`) and turns the demo cluster off. The ClusterRole can list workloads and change deployments, pods, services, and config maps. Treat the dashboard as an admin tool.
+The manifest uses the pod service account (`DASHBOARD_CLUSTER_IN_CLUSTER=true`) and turns the demo cluster off. The ClusterRole can list workloads and change or delete deployments, pods, services, config maps, and namespaces. Treat the dashboard as an admin tool.
 
 The Service stays inside the cluster until you add one access method. Apply the Ingress or the Istio Gateway and VirtualService, not both:
 

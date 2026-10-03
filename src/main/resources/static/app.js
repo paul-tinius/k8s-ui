@@ -22,6 +22,7 @@ const state = {
   live: true,
   logs: { deployment: "", pod: "", container: "", tail: "100", q: "", lines: [] },
   forwards: [],
+  management: { namespaceName: "", clusterName: "", kubeconfig: "", kind: "deployments", editing: null, yaml: "" },
   ai: Object.assign({
     question: "Why is this unhealthy?",
     includeLogs: true,
@@ -32,6 +33,13 @@ const state = {
   source: null,
   timer: 0
 };
+
+const MANAGE_KINDS = [
+  ["deployments", "Deployments"],
+  ["pods", "Pods"],
+  ["services", "Services"],
+  ["configmaps", "ConfigMaps"]
+];
 
 const tabs = {
   overview: "Overview",
@@ -60,6 +68,21 @@ function storageSet(store, key, value) {
   } catch (error) {
     /* Private browsing can reject localStorage. The fields still work for this page. */
   }
+}
+
+const THEME_KEY = "k8s-dashboard-theme";
+
+function storedTheme() {
+  const saved = storageGet(localStorage, THEME_KEY);
+  return saved === "dark" || saved === "light" || saved === "system" ? saved : "system";
+}
+
+function applyTheme(theme) {
+  const choice = theme === "dark" || theme === "light" || theme === "system" ? theme : "system";
+  document.documentElement.setAttribute("data-theme", choice);
+  const select = document.getElementById("theme");
+  if (select && select.value !== choice) select.value = choice;
+  storageSet(localStorage, THEME_KEY, choice);
 }
 
 function loadAiSettings() {
@@ -120,7 +143,7 @@ function age(created) {
 function tone(status) {
   const value = String(status || "").toLowerCase();
   if (/crash|error|fail|backoff|notready|warn/.test(value)) return "bad";
-  if (/pending|progress/.test(value)) return "warn";
+  if (/pending|progress|terminat/.test(value)) return "warn";
   return "ok";
 }
 
@@ -185,10 +208,24 @@ async function loadClusters() {
 }
 
 async function loadNamespaces(selectAll) {
+  if (!state.clusterId) {
+    state.namespaces = [];
+    state.selectedNamespaces = new Set();
+    state.namespaceKey = "";
+    paintNamespaces();
+    return;
+  }
   state.namespaces = await api("/api/namespaces?" + clusterQuery());
   const key = state.namespaces.join("|");
-  if (selectAll || key !== state.namespaceKey || state.selectedNamespaces.size === 0) {
+  if (selectAll || state.selectedNamespaces.size === 0) {
     state.selectedNamespaces = new Set(state.namespaces);
+  } else if (key !== state.namespaceKey) {
+    const known = new Set(state.namespaceKey.split("|").filter(Boolean));
+    const next = new Set([...state.selectedNamespaces].filter((name) => state.namespaces.includes(name)));
+    state.namespaces.forEach((name) => {
+      if (!known.has(name)) next.add(name);
+    });
+    state.selectedNamespaces = next;
   }
   state.namespaceKey = key;
   paintNamespaces();
@@ -279,6 +316,71 @@ function paintShell() {
     document.getElementById("ai-ask").addEventListener("click", ask);
     document.getElementById("ai-copy").addEventListener("click", copyAnswer);
     toggleAiFields();
+  } else if (state.tab === "management") {
+    view.innerHTML = `
+      <div class="stack">
+        <div class="panel manage">
+          <h2>Resources</h2>
+          <p class="muted">Edit applies the manifest. Delete removes that resource. A pod owned by a deployment is replaced.</p>
+          <label class="inline">Kind
+            <select id="manage-kind">
+              ${MANAGE_KINDS.map(([value, label]) => `<option value="${value}"${state.management.kind === value ? " selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <div id="manage-resources"></div>
+          <form id="manage-edit" class="${state.management.editing ? "" : "hidden"}">
+            <h3 id="manage-edit-title"></h3>
+            <textarea id="manage-yaml">${esc(state.management.yaml)}</textarea>
+            <div class="actions"><button class="primary" type="submit">Save</button><button type="button" id="manage-edit-cancel">Cancel</button></div>
+          </form>
+        </div>
+        <div class="panel manage">
+          <h2>Namespaces</h2>
+          <p id="manage-cluster" class="muted"></p>
+          <form id="namespace-form" class="inline">
+            <input id="namespace-name" placeholder="billing" maxlength="63" autocomplete="off" value="${esc(state.management.namespaceName)}" required>
+            <button class="primary" type="submit">Create</button>
+          </form>
+          <p class="muted">Deleting a namespace removes everything in it. System namespaces stay.</p>
+          <div id="namespace-rows"></div>
+        </div>
+        <div class="panel manage">
+          <h2>Clusters</h2>
+          <div id="cluster-rows"></div>
+          <h3>Add kubeconfig</h3>
+          <p class="muted">Paste the YAML or choose a file. Stored under the server data directory with user-only permissions. Every context becomes a cluster. The file is not sent to a model.</p>
+          <label class="cluster-file">Kubeconfig file <input id="cluster-file" type="file" accept=".yml,.yaml,.conf,.kubeconfig,text/yaml,application/yaml,text/plain"></label>
+          <input id="cluster-name" placeholder="Display name for a single context" value="${esc(state.management.clusterName)}">
+          <textarea id="cluster-kubeconfig" placeholder="apiVersion: v1&#10;kind: Config">${esc(state.management.kubeconfig)}</textarea>
+          <div class="actions"><button class="primary" id="cluster-add" type="button">Add</button></div>
+        </div>
+      </div>`;
+    document.getElementById("manage-kind").addEventListener("change", (event) => {
+      state.management.kind = event.target.value;
+      closeManagedEdit();
+      refresh();
+    });
+    document.getElementById("manage-yaml").addEventListener("input", (event) => {
+      state.management.yaml = event.target.value;
+    });
+    document.getElementById("manage-edit").addEventListener("submit", saveManagedResource);
+    document.getElementById("manage-edit-cancel").addEventListener("click", closeManagedEdit);
+    if (state.management.editing) setManagedEditTitle(state.management.editing);
+    document.getElementById("namespace-name").addEventListener("input", (event) => {
+      state.management.namespaceName = event.target.value;
+    });
+    document.getElementById("namespace-form").addEventListener("submit", createNamespace);
+    document.getElementById("cluster-name").addEventListener("input", (event) => {
+      state.management.clusterName = event.target.value;
+    });
+    document.getElementById("cluster-kubeconfig").addEventListener("input", (event) => {
+      state.management.kubeconfig = event.target.value;
+    });
+    document.getElementById("cluster-file").addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      loadKubeconfigFile(file);
+    });
+    document.getElementById("cluster-add").addEventListener("click", addCluster);
   } else if (state.tab === "overview") {
     view.innerHTML = `<div id="overview-cards" class="cards"></div><div class="split"><div class="panel"><h2>Attention</h2><div id="attention"></div></div><div class="panel"><h2>Pod metrics</h2><div id="metrics"></div></div></div>`;
   } else {
@@ -300,8 +402,8 @@ function captureLogs() {
 }
 
 async function refresh() {
-  if (!state.clusterId) {
-    document.getElementById("view").innerHTML = `<p>Add a kubeconfig to begin. The demo cluster is included unless it was disabled.</p>`;
+  if (!state.clusterId && state.tab !== "management") {
+    document.getElementById("view").innerHTML = `<p>Add a kubeconfig from Management to begin. The demo cluster is included unless it was disabled.</p>`;
     return;
   }
   try {
@@ -310,6 +412,7 @@ async function refresh() {
     else if (state.tab === "logs") await paintLogs();
     else if (state.tab === "forwards") await paintForwards();
     else if (state.tab === "assist") paintAssist();
+    else if (state.tab === "management") await paintManagement();
     else await paintResources();
     notice("");
   } catch (error) {
@@ -602,8 +705,9 @@ async function openDetail(kind, namespace, name) {
   state.selection = { kind, namespace, name };
   try {
     state.detail = await api("/api/resources/" + encodeURIComponent(kind) + "/" + encodeURIComponent(namespace || "_") + "/" + encodeURIComponent(name) + "?" + clusterQuery());
+    if (panelCollapsed("detail")) setPanelCollapsed("detail", false, true);
     paintDetail();
-    if (state.tab !== "overview" && state.tab !== "logs" && state.tab !== "forwards" && state.tab !== "assist") {
+    if (state.tab !== "overview" && state.tab !== "logs" && state.tab !== "forwards" && state.tab !== "assist" && state.tab !== "management") {
       document.querySelectorAll("#grid-body tr.clickable").forEach((row) => {
         row.classList.toggle("selected", row.dataset.name === name && row.dataset.namespace === namespace);
       });
@@ -615,7 +719,8 @@ async function openDetail(kind, namespace, name) {
 
 function paintDetail() {
   const detail = state.detail;
-  const host = document.getElementById("detail");
+  const host = document.getElementById("detail-body");
+  if (!host) return;
   if (!detail) {
     host.innerHTML = `<p class="muted">Select a resource to see its manifest and actions.</p>`;
     return;
@@ -740,63 +845,244 @@ function openApply() {
   });
 }
 
-function openClusters() {
-  const rows = state.clusters.map((cluster) => `
+function managedWhere(resource) {
+  return resource.namespace ? resource.namespace + "/" + resource.name : resource.name;
+}
+
+function setManagedEditTitle(editing) {
+  const title = document.getElementById("manage-edit-title");
+  if (!title || !editing) return;
+  const where = editing.namespace ? editing.namespace + "/" + editing.name : editing.name;
+  title.textContent = "Edit " + editing.kind + " " + where;
+}
+
+function closeManagedEdit() {
+  state.management.editing = null;
+  state.management.yaml = "";
+  const form = document.getElementById("manage-edit");
+  const box = document.getElementById("manage-yaml");
+  if (form) form.classList.add("hidden");
+  if (box) box.value = "";
+}
+
+async function editManagedResource(kind, namespace, name) {
+  try {
+    const detail = await api("/api/resources/" + encodeURIComponent(kind) + "/" + encodeURIComponent(namespace || "_") + "/" + encodeURIComponent(name) + "?" + clusterQuery());
+    const resource = detail.resource;
+    state.management.editing = { kind: resource.kind, namespace: resource.namespace, name: resource.name };
+    state.management.yaml = detail.yaml || "";
+    const form = document.getElementById("manage-edit");
+    const box = document.getElementById("manage-yaml");
+    if (form) form.classList.remove("hidden");
+    if (box) box.value = state.management.yaml;
+    setManagedEditTitle(state.management.editing);
+  } catch (error) {
+    notice(error.message);
+  }
+}
+
+async function saveManagedResource(event) {
+  event.preventDefault();
+  const editing = state.management.editing;
+  const box = document.getElementById("manage-yaml");
+  try {
+    await api("/api/apply?" + clusterQuery(), {
+      method: "POST",
+      body: JSON.stringify({ yaml: box ? box.value : "" })
+    });
+    closeManagedEdit();
+    await loadNamespaces(false);
+    if (editing && state.detail && state.detail.resource.kind === editing.kind
+        && state.detail.resource.name === editing.name
+        && state.detail.resource.namespace === editing.namespace) {
+      await openDetail(editing.kind, editing.namespace || "_", editing.name);
+    }
+    refresh();
+  } catch (error) {
+    notice(error.message);
+  }
+}
+
+async function deleteManagedResource(kind, namespace, name) {
+  const where = namespace ? namespace + "/" + name : name;
+  const ownedPod = kind === "Pod" ? " If a deployment owns it, a new pod is started." : "";
+  if (!window.confirm("Delete " + kind + " " + where + "?" + ownedPod)) return;
+  try {
+    await api("/api/resources/" + encodeURIComponent(kind) + "/" + encodeURIComponent(namespace || "_") + "/" + encodeURIComponent(name) + "?" + clusterQuery(), { method: "DELETE" });
+    if (state.management.editing
+        && state.management.editing.kind === kind
+        && state.management.editing.namespace === namespace
+        && state.management.editing.name === name) {
+      closeManagedEdit();
+    }
+    if (state.selection && state.selection.kind === kind && state.selection.name === name && state.selection.namespace === namespace) {
+      state.selection = null;
+      state.detail = null;
+      paintDetail();
+    }
+    await loadNamespaces(false);
+    refresh();
+  } catch (error) {
+    notice(error.message);
+  }
+}
+
+async function paintManagement() {
+  const clusterHost = document.getElementById("manage-cluster");
+  const namespaceHost = document.getElementById("namespace-rows");
+  const clusterRows = document.getElementById("cluster-rows");
+  const resourceHost = document.getElementById("manage-resources");
+  if (!namespaceHost || !clusterRows || !resourceHost) return;
+  const kindSelect = document.getElementById("manage-kind");
+  if (kindSelect) kindSelect.disabled = !state.clusterId;
+  let resources = [];
+  if (state.clusterId) {
+    resources = await api("/api/resources?kind=" + encodeURIComponent(state.management.kind || "deployments") + "&" + clusterQuery() + namespaceQuery());
+  }
+  resourceHost.innerHTML = resources.length ? resources.map((resource) => `
     <div class="cluster-row">
-      <div><strong>${esc(cluster.name)}</strong><div class="muted">${esc(cluster.server)} · ${esc(cluster.source)}${cluster.active ? " · active" : ""}</div></div>
+      <div><strong>${esc(managedWhere(resource))}</strong><div class="muted">${chip(resource.status)} ${esc(resource.summary)}</div></div>
+      <div class="inline">
+        <button type="button" data-edit-kind="${esc(resource.kind)}" data-edit-namespace="${esc(resource.namespace)}" data-edit-name="${esc(resource.name)}">Edit</button>
+        <button type="button" class="danger" data-remove-kind="${esc(resource.kind)}" data-remove-namespace="${esc(resource.namespace)}" data-remove-name="${esc(resource.name)}">Delete</button>
+      </div>
+    </div>`).join("") : `<p class="muted">${state.clusterId ? "No resources in the selected namespaces." : "Add a cluster before editing resources."}</p>`;
+  resourceHost.querySelectorAll("[data-edit-kind]").forEach((button) => {
+    button.addEventListener("click", () => editManagedResource(button.dataset.editKind, button.dataset.editNamespace, button.dataset.editName));
+  });
+  resourceHost.querySelectorAll("[data-remove-kind]").forEach((button) => {
+    button.addEventListener("click", () => deleteManagedResource(button.dataset.removeKind, button.dataset.removeNamespace, button.dataset.removeName));
+  });
+  const selected = state.clusters.find((cluster) => cluster.id === state.clusterId);
+  if (clusterHost) {
+    clusterHost.textContent = selected
+      ? selected.name + " · " + selected.server
+      : "Add a cluster before creating namespaces.";
+  }
+  let details = [];
+  if (state.clusterId) {
+    details = await api("/api/namespace-details?" + clusterQuery());
+  }
+  namespaceHost.innerHTML = details.length ? details.map((item) => `
+    <div class="cluster-row">
+      <div><strong>${esc(item.name)}</strong><div class="muted">${chip(item.status)}</div></div>
+      ${item.deletable && item.status !== "Terminating"
+        ? `<button type="button" class="danger" data-delete-namespace="${esc(item.name)}">Delete</button>`
+        : `<span class="muted">${item.deletable ? "Removing" : "System"}</span>`}
+    </div>`).join("") : `<p class="muted">${state.clusterId ? "No namespaces." : "No cluster selected."}</p>`;
+  namespaceHost.querySelectorAll("[data-delete-namespace]").forEach((button) => {
+    button.addEventListener("click", () => deleteNamespace(button.dataset.deleteNamespace));
+  });
+  clusterRows.innerHTML = state.clusters.length ? state.clusters.map((cluster) => `
+    <div class="cluster-row">
+      <div><strong>${esc(cluster.name)}</strong><div class="muted">${esc(cluster.server)} · ${esc(cluster.source)}${cluster.id === state.clusterId ? " · selected" : ""}</div></div>
       <div class="inline">
         <button type="button" data-activate="${esc(cluster.id)}">Use</button>
         ${cluster.demo ? "" : `<button type="button" class="danger" data-delete="${esc(cluster.id)}">Remove</button>`}
       </div>
-    </div>`).join("");
-  showModal(`
-    <h2>Clusters</h2>
-    ${rows || "<p>No clusters.</p>"}
-    <h3>Add kubeconfig</h3>
-    <p class="muted">Paste the YAML or choose a file. Stored under the server data directory with user-only permissions. Every context becomes a cluster. The file is not sent to a model.</p>
-    <label class="cluster-file">Kubeconfig file <input id="cluster-file" type="file" accept=".yml,.yaml,.conf,.kubeconfig,text/yaml,application/yaml,text/plain"></label>
-    <input id="cluster-name" placeholder="Display name for a single context">
-    <textarea id="cluster-kubeconfig" placeholder="apiVersion: v1&#10;kind: Config"></textarea>
-    <div class="actions"><button class="primary" id="cluster-add" type="button">Add</button><button type="button" id="modal-close">Close</button></div>`);
-  document.getElementById("modal-close").addEventListener("click", closeModal);
-  document.querySelectorAll("[data-activate]").forEach((button) => button.addEventListener("click", async () => {
-    await api("/api/clusters/" + encodeURIComponent(button.dataset.activate) + "/activate", { method: "POST" });
-    state.clusterId = button.dataset.activate;
+    </div>`).join("") : `<p class="muted">No clusters.</p>`;
+  clusterRows.querySelectorAll("[data-activate]").forEach((button) => {
+    button.addEventListener("click", () => activateCluster(button.dataset.activate));
+  });
+  clusterRows.querySelectorAll("[data-delete]").forEach((button) => {
+    button.addEventListener("click", () => removeCluster(button.dataset.delete));
+  });
+  const form = document.getElementById("namespace-form");
+  if (form) {
+    form.querySelector("button").disabled = !state.clusterId;
+  }
+  const kindLabel = (MANAGE_KINDS.find(([value]) => value === state.management.kind) || MANAGE_KINDS[0])[1];
+  document.getElementById("counts").textContent = selected
+    ? selected.name + " · " + resources.length + " " + kindLabel.toLowerCase()
+    : "No cluster selected";
+}
+
+async function createNamespace(event) {
+  event.preventDefault();
+  const input = document.getElementById("namespace-name");
+  const name = input ? input.value.trim() : "";
+  if (!name || !state.clusterId) return;
+  try {
+    await api("/api/namespaces?" + clusterQuery(), {
+      method: "POST",
+      body: JSON.stringify({ name })
+    });
+    state.management.namespaceName = "";
+    if (input) input.value = "";
+    await loadNamespaces(false);
+    refresh();
+  } catch (error) {
+    notice(error.message);
+  }
+}
+
+async function deleteNamespace(name) {
+  if (!name || !state.clusterId) return;
+  if (!window.confirm("Delete namespace " + name + " and everything in it?")) return;
+  try {
+    await api("/api/namespaces/" + encodeURIComponent(name) + "?" + clusterQuery(), { method: "DELETE" });
+    if (state.selection && state.selection.namespace === name) {
+      state.selection = null;
+      state.detail = null;
+      paintDetail();
+    }
+    await loadNamespaces(false);
+    refresh();
+  } catch (error) {
+    notice(error.message);
+  }
+}
+
+async function activateCluster(id) {
+  try {
+    await api("/api/clusters/" + encodeURIComponent(id) + "/activate", { method: "POST" });
+    state.clusterId = id;
     document.getElementById("cluster").value = state.clusterId;
-    closeModal();
     await loadNamespaces(true);
     state.detail = null;
     paintDetail();
     refresh();
-  }));
-  document.querySelectorAll("[data-delete]").forEach((button) => button.addEventListener("click", async () => {
-    await api("/api/clusters/" + encodeURIComponent(button.dataset.delete), { method: "DELETE" });
-    closeModal();
+  } catch (error) {
+    notice(error.message);
+  }
+}
+
+async function removeCluster(id) {
+  try {
+    await api("/api/clusters/" + encodeURIComponent(id), { method: "DELETE" });
+    if (state.clusterId === id) {
+      state.detail = null;
+      paintDetail();
+    }
     await loadClusters();
     await loadNamespaces(true);
     refresh();
-  }));
-  document.getElementById("cluster-file").addEventListener("change", (event) => {
-    const file = event.target.files && event.target.files[0];
-    loadKubeconfigFile(file);
-  });
-  document.getElementById("cluster-add").addEventListener("click", async () => {
-    try {
-      await api("/api/clusters", {
-        method: "POST",
-        body: JSON.stringify({
-          name: document.getElementById("cluster-name").value.trim(),
-          kubeconfig: document.getElementById("cluster-kubeconfig").value
-        })
-      });
-      closeModal();
-      await loadClusters();
-      await loadNamespaces(true);
-      refresh();
-    } catch (error) {
-      notice(error.message);
-    }
-  });
+  } catch (error) {
+    notice(error.message);
+  }
+}
+
+async function addCluster() {
+  const nameInput = document.getElementById("cluster-name");
+  const kubeconfig = document.getElementById("cluster-kubeconfig");
+  try {
+    await api("/api/clusters", {
+      method: "POST",
+      body: JSON.stringify({
+        name: nameInput ? nameInput.value.trim() : "",
+        kubeconfig: kubeconfig ? kubeconfig.value : ""
+      })
+    });
+    state.management.clusterName = "";
+    state.management.kubeconfig = "";
+    if (nameInput) nameInput.value = "";
+    if (kubeconfig) kubeconfig.value = "";
+    await loadClusters();
+    await loadNamespaces(true);
+    refresh();
+  } catch (error) {
+    notice(error.message);
+  }
 }
 
 async function loadKubeconfigFile(file) {
@@ -819,9 +1105,11 @@ async function loadKubeconfigFile(file) {
   const box = document.getElementById("cluster-kubeconfig");
   const name = document.getElementById("cluster-name");
   if (box) box.value = text;
+  state.management.kubeconfig = text;
   const stem = file.name.replace(/\.[^.]+$/, "");
   if (name && !name.value.trim() && stem && stem.toLowerCase() !== "config") {
     name.value = stem;
+    state.management.clusterName = stem;
   }
   notice("");
 }
@@ -860,6 +1148,58 @@ async function boot() {
   connectLive();
 }
 
+const PANEL_RAIL = 44;
+const PANEL_COLLAPSE = {
+  namespaces: {
+    key: "k8s-dashboard-namespaces-collapsed",
+    className: "namespaces-collapsed",
+    button: "namespace-collapse",
+    splitter: "split-namespaces",
+    show: "Show namespaces",
+    hide: "Hide namespaces"
+  },
+  detail: {
+    key: "k8s-dashboard-detail-collapsed",
+    className: "detail-collapsed",
+    button: "detail-collapse",
+    splitter: "split-detail",
+    show: "Show manifest",
+    hide: "Hide manifest"
+  }
+};
+
+function panelCollapsed(side) {
+  const workspace = document.getElementById("workspace");
+  return Boolean(workspace && workspace.classList.contains(PANEL_COLLAPSE[side].className));
+}
+
+function setPanelCollapsed(side, collapsed, persist) {
+  const spec = PANEL_COLLAPSE[side];
+  const workspace = document.getElementById("workspace");
+  const button = document.getElementById(spec.button);
+  const splitter = document.getElementById(spec.splitter);
+  if (workspace) workspace.classList.toggle(spec.className, collapsed);
+  if (button) {
+    button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    button.setAttribute("aria-label", collapsed ? spec.show : spec.hide);
+  }
+  if (splitter) {
+    splitter.hidden = collapsed && !stackedLayout();
+    splitter.tabIndex = collapsed ? -1 : 0;
+  }
+  if (persist) {
+    try {
+      sessionStorage.setItem(spec.key, collapsed ? "1" : "0");
+    } catch (error) {
+      /* Private browsing can reject sessionStorage. The panel still toggles. */
+    }
+  }
+  if (workspace && !stackedLayout()) {
+    const other = side === "namespaces" ? "detail" : "namespaces";
+    applyPanelWidth(workspace, other, panels[other]);
+  }
+}
+
 const PANEL_LIMITS = {
   namespaces: { min: 160, max: 520, fallback: 230, key: "k8s-dashboard-namespaces-width" },
   detail: { min: 240, max: 760, fallback: 360, key: "k8s-dashboard-detail-width" }
@@ -874,6 +1214,8 @@ function installSplitters() {
   const workspace = document.getElementById("workspace");
   if (!workspace) return;
   restorePanelWidths(workspace);
+  setPanelCollapsed("namespaces", sessionStorage.getItem(PANEL_COLLAPSE.namespaces.key) === "1", false);
+  setPanelCollapsed("detail", sessionStorage.getItem(PANEL_COLLAPSE.detail.key) === "1", false);
   bindSplitter(document.getElementById("split-namespaces"), "namespaces");
   bindSplitter(document.getElementById("split-detail"), "detail");
   window.addEventListener("resize", () => {
@@ -947,7 +1289,9 @@ function clampPanel(workspace, side, width) {
   let max = limit.max;
   const rect = workspace.getBoundingClientRect();
   if (rect.width > 0) {
-    const other = side === "namespaces" ? panels.detail : panels.namespaces;
+    const other = side === "namespaces"
+      ? (panelCollapsed("detail") ? PANEL_RAIL : panels.detail)
+      : (panelCollapsed("namespaces") ? PANEL_RAIL : panels.namespaces);
     max = Math.min(max, Math.max(limit.min, rect.width - other - MAIN_MIN));
   }
   return Math.min(Math.max(rounded, limit.min), max);
@@ -1004,6 +1348,11 @@ document.getElementById("live").addEventListener("change", (event) => {
   state.live = event.target.checked;
 });
 
+applyTheme(storedTheme());
+document.getElementById("theme").addEventListener("change", (event) => {
+  applyTheme(event.target.value);
+});
+
 document.getElementById("ns-all").addEventListener("click", () => {
   const allSelected = state.selectedNamespaces.size === state.namespaces.length;
   state.selectedNamespaces = allSelected ? new Set() : new Set(state.namespaces);
@@ -1011,8 +1360,20 @@ document.getElementById("ns-all").addEventListener("click", () => {
   refresh();
 });
 
+document.getElementById("namespace-collapse").addEventListener("click", () => {
+  setPanelCollapsed("namespaces", !panelCollapsed("namespaces"), true);
+});
+document.getElementById("detail-collapse").addEventListener("click", () => {
+  setPanelCollapsed("detail", !panelCollapsed("detail"), true);
+});
 document.getElementById("apply-open").addEventListener("click", openApply);
-document.getElementById("clusters-open").addEventListener("click", openClusters);
+document.getElementById("clusters-open").addEventListener("click", () => {
+  if (state.tab !== "management") {
+    state.tab = "management";
+    state.shellTab = "";
+  }
+  refresh();
+});
 installSplitters();
 document.getElementById("gate-form").addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -1,11 +1,13 @@
 package com.paultinius.k8s.dashboard.cluster;
 
+import com.paultinius.k8s.dashboard.error.DashboardException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DemoClusterTest {
 
@@ -106,6 +108,88 @@ class DemoClusterTest {
         assertThat(forward.podName()).startsWith("storefront-");
         assertThat(forward.remotePort()).isEqualTo(8080);
         assertThat(forward.localPort()).isGreaterThan(0);
+    }
+
+    @Test
+    void createNamespace_newName_listsItAsActive() {
+        cluster.createNamespace("billing");
+
+        assertThat(cluster.namespaces()).contains("billing");
+        assertThat(cluster.namespaceDetails())
+                .filteredOn(item -> "billing".equals(item.name()))
+                .singleElement()
+                .satisfies(item -> {
+                    assertThat(item.status()).isEqualTo("Active");
+                    assertThat(item.deletable()).isTrue();
+                });
+        assertThat(cluster.overview(Set.of("billing")).namespaces()).isEqualTo(1);
+    }
+
+    @Test
+    void createNamespace_existingName_isRejected() {
+        assertThatThrownBy(() -> cluster.createNamespace("shop"))
+                .isInstanceOf(DashboardException.class)
+                .hasMessageContaining("already exists");
+    }
+
+    @Test
+    void deleteResource_cartDeployment_removesItAndItsPods() {
+        cluster.deleteResource(ResourceKind.DEPLOYMENT, "shop", "cart");
+
+        assertThat(cluster.list(ResourceKind.DEPLOYMENT, Set.of("shop")))
+                .extracting(item -> item.name())
+                .doesNotContain("cart");
+        assertThat(cluster.list(ResourceKind.POD, Set.of("shop")))
+                .extracting(item -> item.name())
+                .noneMatch(name -> name.startsWith("cart-"));
+    }
+
+    @Test
+    void deleteResource_storefrontConfig_removesTheConfigMap() {
+        cluster.deleteResource(ResourceKind.CONFIG_MAP, "shop", "storefront-config");
+
+        assertThat(cluster.list(ResourceKind.CONFIG_MAP, Set.of("shop")))
+                .extracting(item -> item.name())
+                .doesNotContain("storefront-config");
+    }
+
+    @Test
+    void deleteResource_node_isRejected() {
+        assertThatThrownBy(() -> cluster.deleteResource(ResourceKind.NODE, "", "node-a"))
+                .isInstanceOf(DashboardException.class)
+                .hasMessageContaining("cannot be deleted");
+    }
+
+    @Test
+    void deleteNamespace_shop_removesItsWorkloads() {
+        cluster.deleteNamespace("shop");
+
+        assertThat(cluster.namespaces()).contains("payments", "observability").doesNotContain("shop");
+        assertThat(cluster.list(ResourceKind.POD, Set.of("shop"))).isEmpty();
+        assertThat(cluster.list(ResourceKind.DEPLOYMENT, Set.of("shop"))).isEmpty();
+        assertThat(cluster.list(ResourceKind.POD, Set.of("payments"))).isNotEmpty();
+    }
+
+    @Test
+    void deleteNamespace_kubeSystem_isRejected() {
+        assertThatThrownBy(() -> cluster.deleteNamespace("kube-system"))
+                .isInstanceOf(DashboardException.class)
+                .hasMessageContaining("cannot be deleted");
+    }
+
+    @Test
+    void applyYaml_newNamespace_addsTheNamespace() {
+        cluster.applyYaml("""
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: flags
+                  namespace: sandbox
+                data:
+                  checkout: "on"
+                """);
+
+        assertThat(cluster.namespaces()).contains("sandbox");
     }
 
     @Test
