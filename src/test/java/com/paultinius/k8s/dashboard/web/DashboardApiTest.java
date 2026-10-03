@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.lang.NonNull;
 import org.springframework.mock.web.MockAsyncContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -272,6 +273,7 @@ class DashboardApiTest {
                 .andExpect(jsonPath("$.error").value("Node cannot be deleted"));
     }
 
+    @NonNull
     private String configMapBody(String name, String checkout) throws Exception {
         String yaml = """
                 apiVersion: v1
@@ -282,7 +284,11 @@ class DashboardApiTest {
                 data:
                   checkout: "%s"
                 """.formatted(name, checkout);
-        return mapper.writeValueAsString(mapper.createObjectNode().put("yaml", yaml));
+        String body = mapper.writeValueAsString(mapper.createObjectNode().put("yaml", yaml));
+        if (body == null) {
+            throw new IllegalStateException("Could not encode the config map request");
+        }
+        return body;
     }
 
     @Test

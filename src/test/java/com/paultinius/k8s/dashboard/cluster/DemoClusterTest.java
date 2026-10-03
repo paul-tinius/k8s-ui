@@ -83,6 +83,34 @@ class DemoClusterTest {
     }
 
     @Test
+    void applyYaml_ownedStorefrontPod_updatesThatPodWithoutADuplicate() {
+        String edited = cluster.detail(ResourceKind.POD, "shop", "storefront-a").yaml()
+                .replace("ghcr.io/example/storefront:1.4.2", "ghcr.io/example/storefront:9.9.9");
+
+        cluster.applyYaml(edited);
+
+        var pods = cluster.list(ResourceKind.POD, Set.of("shop"));
+        assertThat(pods).filteredOn(pod -> "storefront-a".equals(pod.name()))
+                .singleElement()
+                .satisfies(pod -> assertThat(pod.images()).containsExactly("ghcr.io/example/storefront:9.9.9"));
+        assertThat(pods).filteredOn(pod -> "storefront".equals(pod.labels().get("app"))).hasSize(3);
+    }
+
+    @Test
+    void deleteResource_savedOwnedStorefrontPod_replacesTheDeploymentPod() {
+        cluster.applyYaml(cluster.detail(ResourceKind.POD, "shop", "storefront-a").yaml());
+
+        cluster.deleteResource(ResourceKind.POD, "shop", "storefront-a");
+
+        var pods = cluster.list(ResourceKind.POD, Set.of("shop")).stream()
+                .filter(pod -> "storefront".equals(pod.labels().get("app")))
+                .toList();
+        assertThat(pods).hasSize(3);
+        assertThat(pods).extracting(pod -> pod.name()).doesNotContain("storefront-a");
+        assertThat(pods).allMatch(pod -> "Running".equals(pod.status()));
+    }
+
+    @Test
     void applyYaml_configMap_appearsInTheNamespace() {
         cluster.applyYaml("""
                 apiVersion: v1
