@@ -227,4 +227,16 @@ class DemoClusterTest {
         assertThat(pods).hasSize(3);
         assertThat(pods).extracting(pod -> pod.name()).doesNotContain("storefront-a");
     }
+
+    @Test
+    void applyYaml_unchangedCrashingPodManifest_keepsTheFailure() {
+        cluster.applyYaml(cluster.detail(ResourceKind.POD, "payments", "ledger-a").yaml());
+
+        assertThat(cluster.list(ResourceKind.POD, Set.of("payments")))
+                .filteredOn(pod -> "ledger-a".equals(pod.name()))
+                .singleElement()
+                .extracting(pod -> pod.status())
+                .isEqualTo("CrashLoopBackOff");
+        assertThat(cluster.overview(Set.of("payments")).attention()).anyMatch(item -> "ledger-a".equals(item.name()));
+    }
 }

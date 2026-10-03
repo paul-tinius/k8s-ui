@@ -442,7 +442,7 @@ public final class DemoCluster implements ClusterClient {
             }
             for (int index = 0; index < deployment.pods.size(); index++) {
                 if (deployment.pods.get(index).name.equals(name)) {
-                    deployment.pods.set(index, appliedPod(namespace, name, deployment.name, document));
+                    deployment.pods.set(index, reappliedPod(deployment.pods.get(index), document));
                     return;
                 }
             }
@@ -450,6 +450,28 @@ public final class DemoCluster implements ClusterClient {
         standalonePods.removeIf(item -> item.namespace.equals(namespace) && item.name.equals(name));
         standalonePods.add(appliedPod(namespace, name, null, document));
         rememberNamespace(namespace);
+    }
+
+    private Pod reappliedPod(Pod existing, Map<String, Object> document) {
+        Map<String, Object> spec = YamlMaps.child(document, "spec");
+        Map<String, Object> container = firstContainer(spec);
+        return new Pod(
+                existing.namespace,
+                existing.name,
+                existing.owner,
+                textOr(spec, "nodeName", existing.node),
+                textOr(container, "image", existing.image),
+                textOr(container, "name", existing.container),
+                existing.status,
+                existing.ready,
+                existing.desired,
+                labelsOr(YamlMaps.child(document, "metadata"), existing.name),
+                existing.created,
+                existing.logs,
+                existing.cpu,
+                existing.memory,
+                existing.restarts
+        );
     }
 
     private Pod appliedPod(String namespace, String name, String owner, Map<String, Object> document) {
