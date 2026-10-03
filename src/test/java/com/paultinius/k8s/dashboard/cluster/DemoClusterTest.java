@@ -200,4 +200,31 @@ class DemoClusterTest {
         assertThat(overview.readyPods()).isLessThan(overview.pods());
         assertThat(overview.attention()).anyMatch(item -> "ledger-a".equals(item.name()));
     }
+
+    @Test
+    void applyYaml_unchangedServiceManifest_keepsPortsAndSelector() {
+        cluster.applyYaml(cluster.detail(ResourceKind.SERVICE, "shop", "storefront").yaml());
+
+        var service = cluster.detail(ResourceKind.SERVICE, "shop", "storefront");
+        assertThat(service.resource().attributes()).containsEntry("ports", "80:8080");
+        assertThat(service.yaml()).contains("app: storefront");
+        assertThat(cluster.openForward("shop", "service", "storefront", 8080, 0).view().podName()).startsWith("storefront-");
+    }
+
+    @Test
+    void applyYaml_unchangedOwnedPodManifest_keepsASinglePodOwnedByTheDeployment() {
+        cluster.applyYaml(cluster.detail(ResourceKind.POD, "shop", "storefront-a").yaml());
+
+        assertThat(cluster.list(ResourceKind.POD, Set.of("shop")))
+                .filteredOn(pod -> "storefront-a".equals(pod.name()))
+                .hasSize(1);
+
+        cluster.deletePod("shop", "storefront-a");
+
+        var pods = cluster.list(ResourceKind.POD, Set.of("shop")).stream()
+                .filter(pod -> "storefront".equals(pod.labels().get("app")))
+                .toList();
+        assertThat(pods).hasSize(3);
+        assertThat(pods).extracting(pod -> pod.name()).doesNotContain("storefront-a");
+    }
 }

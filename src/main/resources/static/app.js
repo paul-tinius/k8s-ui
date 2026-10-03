@@ -865,11 +865,17 @@ function closeManagedEdit() {
   if (box) box.value = "";
 }
 
+function closeManagedEditOutside(clusterId) {
+  if (state.management.editing && state.management.editing.clusterId !== clusterId) closeManagedEdit();
+}
+
 async function editManagedResource(kind, namespace, name) {
+  const clusterId = state.clusterId;
   try {
-    const detail = await api("/api/resources/" + encodeURIComponent(kind) + "/" + encodeURIComponent(namespace || "_") + "/" + encodeURIComponent(name) + "?" + clusterQuery());
+    const detail = await api("/api/resources/" + encodeURIComponent(kind) + "/" + encodeURIComponent(namespace || "_") + "/" + encodeURIComponent(name) + "?cluster=" + encodeURIComponent(clusterId));
+    if (clusterId !== state.clusterId) return;
     const resource = detail.resource;
-    state.management.editing = { kind: resource.kind, namespace: resource.namespace, name: resource.name };
+    state.management.editing = { clusterId, kind: resource.kind, namespace: resource.namespace, name: resource.name };
     state.management.yaml = detail.yaml || "";
     const form = document.getElementById("manage-edit");
     const box = document.getElementById("manage-yaml");
@@ -884,15 +890,16 @@ async function editManagedResource(kind, namespace, name) {
 async function saveManagedResource(event) {
   event.preventDefault();
   const editing = state.management.editing;
+  if (!editing) return;
   const box = document.getElementById("manage-yaml");
   try {
-    await api("/api/apply?" + clusterQuery(), {
+    await api("/api/apply?cluster=" + encodeURIComponent(editing.clusterId), {
       method: "POST",
       body: JSON.stringify({ yaml: box ? box.value : "" })
     });
     closeManagedEdit();
     await loadNamespaces(false);
-    if (editing && state.detail && state.detail.resource.kind === editing.kind
+    if (editing.clusterId === state.clusterId && state.detail && state.detail.resource.kind === editing.kind
         && state.detail.resource.name === editing.name
         && state.detail.resource.namespace === editing.namespace) {
       await openDetail(editing.kind, editing.namespace || "_", editing.name);
@@ -1037,6 +1044,7 @@ async function activateCluster(id) {
   try {
     await api("/api/clusters/" + encodeURIComponent(id) + "/activate", { method: "POST" });
     state.clusterId = id;
+    closeManagedEditOutside(state.clusterId);
     document.getElementById("cluster").value = state.clusterId;
     await loadNamespaces(true);
     state.detail = null;
@@ -1050,11 +1058,13 @@ async function activateCluster(id) {
 async function removeCluster(id) {
   try {
     await api("/api/clusters/" + encodeURIComponent(id), { method: "DELETE" });
+    if (state.management.editing && state.management.editing.clusterId === id) closeManagedEdit();
     if (state.clusterId === id) {
       state.detail = null;
       paintDetail();
     }
     await loadClusters();
+    closeManagedEditOutside(state.clusterId);
     await loadNamespaces(true);
     refresh();
   } catch (error) {
@@ -1326,6 +1336,7 @@ document.getElementById("tabs").addEventListener("click", (event) => {
 
 document.getElementById("cluster").addEventListener("change", async () => {
   state.clusterId = document.getElementById("cluster").value;
+  closeManagedEditOutside(state.clusterId);
   state.detail = null;
   paintDetail();
   try {

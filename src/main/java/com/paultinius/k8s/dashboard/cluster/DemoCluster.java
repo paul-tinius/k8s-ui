@@ -436,13 +436,29 @@ public final class DemoCluster implements ClusterClient {
     }
 
     private void upsertPod(String namespace, String name, Map<String, Object> document) {
+        for (Deployment deployment : deployments) {
+            if (!deployment.namespace.equals(namespace)) {
+                continue;
+            }
+            for (int index = 0; index < deployment.pods.size(); index++) {
+                if (deployment.pods.get(index).name.equals(name)) {
+                    deployment.pods.set(index, appliedPod(namespace, name, deployment.name, document));
+                    return;
+                }
+            }
+        }
+        standalonePods.removeIf(item -> item.namespace.equals(namespace) && item.name.equals(name));
+        standalonePods.add(appliedPod(namespace, name, null, document));
+        rememberNamespace(namespace);
+    }
+
+    private Pod appliedPod(String namespace, String name, String owner, Map<String, Object> document) {
         Map<String, Object> spec = YamlMaps.child(document, "spec");
         Map<String, Object> container = firstContainer(spec);
-        standalonePods.removeIf(item -> item.namespace.equals(namespace) && item.name.equals(name));
-        standalonePods.add(new Pod(
+        return new Pod(
                 namespace,
                 name,
-                null,
+                owner,
                 textOr(spec, "nodeName", "node-a"),
                 textOr(container, "image", "example/app:latest"),
                 textOr(container, "name", "app"),
@@ -455,8 +471,7 @@ public final class DemoCluster implements ClusterClient {
                 "10m",
                 "64Mi",
                 0
-        ));
-        rememberNamespace(namespace);
+        );
     }
 
     private Map<String, Object> firstContainer(Map<String, Object> spec) {
@@ -719,6 +734,9 @@ public final class DemoCluster implements ClusterClient {
     }
 
     private String serviceYaml(ServiceObj service) {
+        String[] ports = service.ports.split(":", 2);
+        String targetPort = ports.length > 1 ? ports[1] : ports[0];
+        String selector = service.selector.isEmpty() ? "  selector: {}" : "  selector:\n" + labelYaml(service.selector);
         return """
                 apiVersion: v1
                 kind: Service
@@ -730,7 +748,9 @@ public final class DemoCluster implements ClusterClient {
                   clusterIP: %s
                   ports:
                     - port: %s
-                """.formatted(service.name, service.namespace, service.type, service.clusterIp, service.ports.replace(':', ' '));
+                      targetPort: %s
+                %s
+                """.formatted(service.name, service.namespace, service.type, service.clusterIp, ports[0], targetPort, selector);
     }
 
     private String configMapYaml(ConfigMapObj configMap) {
