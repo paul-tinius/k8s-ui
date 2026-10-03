@@ -6,6 +6,18 @@
   <meta name="robots" content="noindex">
   <title>Kubernetes Dashboard</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <script>
+    (function () {
+      var theme = "system";
+      try {
+        var saved = localStorage.getItem("k8s-dashboard-theme");
+        if (saved === "dark" || saved === "light" || saved === "system") theme = saved;
+      } catch (error) {
+        theme = "system";
+      }
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -40,9 +52,17 @@
         <input id="live" type="checkbox" checked>
         Live
       </label>
+      <label class="theme-pick">
+        <span>Theme</span>
+        <select id="theme">
+          <option value="system">System</option>
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+        </select>
+      </label>
       <div class="top-actions">
         <button type="button" id="apply-open">Apply YAML</button>
-        <button type="button" id="clusters-open">Clusters</button>
+        <button type="button" id="clusters-open">Manage</button>
       </div>
     </header>
     <div class="refine">
@@ -54,11 +74,19 @@
     </div>
     <div class="body" id="workspace">
       <aside class="namespaces">
-        <div class="aside-head">
-          <h2>Namespaces</h2>
-          <button type="button" id="ns-all">All</button>
+        <div class="rail-tools">
+          <button type="button" id="namespace-collapse" aria-expanded="true" aria-controls="namespace-body" aria-label="Hide namespaces">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+            <span class="rail-label">Namespaces</span>
+          </button>
         </div>
-        <div id="namespace-list"></div>
+        <div id="namespace-body">
+          <div class="aside-head">
+            <h2>Namespaces</h2>
+            <button type="button" id="ns-all">All</button>
+          </div>
+          <div id="namespace-list"></div>
+        </div>
       </aside>
       <main>
         <nav class="tabs" id="tabs">
@@ -72,11 +100,20 @@
           <button type="button" data-tab="logs">Logs</button>
           <button type="button" data-tab="forwards">Port forward</button>
           <button type="button" data-tab="assist">Assist</button>
+          <button type="button" data-tab="management">Management</button>
         </nav>
         <section id="view"></section>
       </main>
       <aside id="detail" class="detail">
-        <p class="muted">Select a resource to see its manifest and actions.</p>
+        <div class="rail-tools">
+          <button type="button" id="detail-collapse" aria-expanded="true" aria-controls="detail-body" aria-label="Hide manifest">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            <span class="rail-label">Manifest</span>
+          </button>
+        </div>
+        <div id="detail-body">
+          <p class="muted">Select a resource to see its manifest and actions.</p>
+        </div>
       </aside>
       <div id="split-namespaces" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize namespaces" tabindex="0"></div>
       <div id="split-detail" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize manifest" tabindex="0"></div>

@@ -6,11 +6,14 @@ import com.paultinius.k8s.dashboard.model.ClusterInfo;
 import com.paultinius.k8s.dashboard.model.ForwardView;
 import com.paultinius.k8s.dashboard.model.LogLine;
 import com.paultinius.k8s.dashboard.model.LogPage;
+import com.paultinius.k8s.dashboard.model.NamespaceView;
 import com.paultinius.k8s.dashboard.model.Overview;
 import com.paultinius.k8s.dashboard.model.ResourceDetail;
 import com.paultinius.k8s.dashboard.model.ResourceView;
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.Event;
+import io.fabric8.kubernetes.api.model.Namespace;
+import io.fabric8.kubernetes.api.model.NamespaceBuilder;
 import io.fabric8.kubernetes.api.model.Node;
 import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.Pod;
@@ -120,10 +123,45 @@ final class LiveCluster implements ClusterClient {
 
     @Override
     public List<String> namespaces() {
+        return namespaceDetails().stream().map(view -> view.name()).toList();
+    }
+
+    @Override
+    public List<NamespaceView> namespaceDetails() {
         return call(() -> client().namespaces().list().getItems().stream()
-                .map(item -> item.getMetadata().getName())
-                .sorted()
+                .map(LiveCluster::namespaceView)
+                .sorted(Comparator.comparing(view -> view.name()))
                 .toList());
+    }
+
+    @Override
+    public void createNamespace(String name) {
+        String namespace = NamespaceNames.requireCreatable(name);
+        call(() -> {
+            if (client().namespaces().withName(namespace).get() != null) {
+                throw DashboardException.badRequest("Namespace " + namespace + " already exists");
+            }
+            client().namespaces().resource(new NamespaceBuilder()
+                    .withNewMetadata()
+                    .withName(namespace)
+                    .endMetadata()
+                    .build()).create();
+            return null;
+        });
+        changed();
+    }
+
+    @Override
+    public void deleteNamespace(String name) {
+        String namespace = NamespaceNames.requireDeletable(name);
+        call(() -> {
+            if (client().namespaces().withName(namespace).get() == null) {
+                throw DashboardException.notFound("Namespace " + namespace + " was not found");
+            }
+            client().namespaces().withName(namespace).delete();
+            return null;
+        });
+        changed();
     }
 
     @Override
@@ -266,6 +304,38 @@ final class LiveCluster implements ClusterClient {
         require(client().pods().inNamespace(namespace).withName(name).get(), "Pod", namespace, name);
         call(() -> client().pods().inNamespace(namespace).withName(name).delete());
         changed();
+    }
+
+    @Override
+    public void deleteResource(ResourceKind kind, String namespace, String name) {
+        switch (kind) {
+            case POD -> deletePod(namespace, name);
+            case DEPLOYMENT -> {
+                require(client().apps().deployments().inNamespace(namespace).withName(name).get(), "Deployment", namespace, name);
+                call(() -> {
+                    client().apps().deployments().inNamespace(namespace).withName(name).delete();
+                    return null;
+                });
+                changed();
+            }
+            case SERVICE -> {
+                require(client().services().inNamespace(namespace).withName(name).get(), "Service", namespace, name);
+                call(() -> {
+                    client().services().inNamespace(namespace).withName(name).delete();
+                    return null;
+                });
+                changed();
+            }
+            case CONFIG_MAP -> {
+                require(client().configMaps().inNamespace(namespace).withName(name).get(), "ConfigMap", namespace, name);
+                call(() -> {
+                    client().configMaps().inNamespace(namespace).withName(name).delete();
+                    return null;
+                });
+                changed();
+            }
+            case NODE, EVENT -> throw DashboardException.badRequest(kind.apiName() + " cannot be deleted");
+        }
     }
 
     @Override
@@ -618,6 +688,18 @@ final class LiveCluster implements ClusterClient {
         if (kind.namespaced() && (namespace == null || namespace.isBlank())) {
             throw DashboardException.badRequest(kind.apiName() + " requires a namespace");
         }
+    }
+
+    private static NamespaceView namespaceView(Namespace namespace) {
+        String name = "";
+        if (namespace.getMetadata() != null && namespace.getMetadata().getName() != null) {
+            name = namespace.getMetadata().getName();
+        }
+        String status = "Active";
+        if (namespace.getStatus() != null && namespace.getStatus().getPhase() != null) {
+            status = namespace.getStatus().getPhase();
+        }
+        return new NamespaceView(name, status, NamespaceNames.deletable(name));
     }
 
     private static <T> T require(T resource, String kind, String namespace, String name) {

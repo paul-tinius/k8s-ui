@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.lang.NonNull;
 import org.springframework.mock.web.MockAsyncContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -80,7 +81,11 @@ class DashboardApiTest {
                 .andReturn()
                 .getResponse()
                 .getContentAsString();
-        assertThat(html).contains("Kubernetes Dashboard");
+        assertThat(html).contains("Kubernetes Dashboard")
+                .contains("data-tab=\"management\"")
+                .contains("id=\"detail-collapse\"")
+                .contains("id=\"namespace-collapse\"")
+                .contains("id=\"theme\"");
     }
 
     @Test
@@ -221,6 +226,135 @@ class DashboardApiTest {
                 .getResponse()
                 .getContentAsString();
         assertThat(mapper.readTree(listed).path("yaml").asText()).contains("feature-flags");
+    }
+
+    @Test
+    void resources_configMap_editThenDelete_updatesThenRemovesIt() throws Exception {
+        String name = "flag" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        boolean created = false;
+        try {
+            mockMvc.perform(post("/api/apply")
+                            .param("cluster", "demo")
+                            .contentType(MediaType.APPLICATION_JSON_VALUE)
+                            .content(configMapBody(name, "on")))
+                    .andExpect(status().isOk());
+            created = true;
+
+            mockMvc.perform(post("/api/apply")
+                            .param("cluster", "demo")
+                            .contentType(MediaType.APPLICATION_JSON_VALUE)
+                            .content(configMapBody(name, "off")))
+                    .andExpect(status().isOk());
+
+            String edited = mockMvc.perform(get("/api/resources/ConfigMap/shop/" + name).param("cluster", "demo"))
+                    .andExpect(status().isOk())
+                    .andReturn()
+                    .getResponse()
+                    .getContentAsString();
+            assertThat(mapper.readTree(edited).path("yaml").asText()).contains("checkout: \"off\"");
+
+            mockMvc.perform(delete("/api/resources/ConfigMap/shop/" + name).param("cluster", "demo"))
+                    .andExpect(status().isOk());
+            created = false;
+
+            mockMvc.perform(get("/api/resources/ConfigMap/shop/" + name).param("cluster", "demo"))
+                    .andExpect(status().isNotFound());
+        } finally {
+            if (created) {
+                mockMvc.perform(delete("/api/resources/ConfigMap/shop/" + name).param("cluster", "demo"));
+            }
+        }
+    }
+
+    @Test
+    void resources_node_isRejected() throws Exception {
+        mockMvc.perform(delete("/api/resources/Node/_/node-a").param("cluster", "demo"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Node cannot be deleted"));
+    }
+
+    @NonNull
+    private String configMapBody(String name, String checkout) throws Exception {
+        String yaml = """
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: %s
+                  namespace: shop
+                data:
+                  checkout: "%s"
+                """.formatted(name, checkout);
+        String body = mapper.writeValueAsString(mapper.createObjectNode().put("yaml", yaml));
+        if (body == null) {
+            throw new IllegalStateException("Could not encode the config map request");
+        }
+        return body;
+    }
+
+    @Test
+    void namespaces_newName_appearsThenDisappears() throws Exception {
+        String name = "bill" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        boolean created = false;
+        try {
+            String body = mockMvc.perform(post("/api/namespaces")
+                            .param("cluster", "demo")
+                            .contentType(MediaType.APPLICATION_JSON_VALUE)
+                            .content("{\"name\":\"" + name + "\"}"))
+                    .andExpect(status().isOk())
+                    .andReturn()
+                    .getResponse()
+                    .getContentAsString();
+            created = true;
+            assertThat(mapper.readTree(body)).anyMatch(item ->
+                    name.equals(item.path("name").asText())
+                            && item.path("deletable").asBoolean()
+                            && "Active".equals(item.path("status").asText()));
+
+            String listed = mockMvc.perform(get("/api/namespaces").param("cluster", "demo"))
+                    .andExpect(status().isOk())
+                    .andReturn()
+                    .getResponse()
+                    .getContentAsString();
+            assertThat(mapper.readTree(listed)).anyMatch(item -> name.equals(item.asText()));
+        } finally {
+            if (created) {
+                mockMvc.perform(delete("/api/namespaces/" + name).param("cluster", "demo"))
+                        .andExpect(status().isOk());
+            }
+        }
+
+        String remaining = mockMvc.perform(get("/api/namespaces").param("cluster", "demo"))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        assertThat(mapper.readTree(remaining)).noneMatch(item -> name.equals(item.asText()));
+    }
+
+    @Test
+    void namespaces_kubeSystem_isRejected() throws Exception {
+        mockMvc.perform(delete("/api/namespaces/kube-system").param("cluster", "demo"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Namespace kube-system cannot be deleted"));
+    }
+
+    @Test
+    void namespaces_reservedName_isRejected() throws Exception {
+        mockMvc.perform(post("/api/namespaces")
+                        .param("cluster", "demo")
+                        .contentType(MediaType.APPLICATION_JSON_VALUE)
+                        .content("{\"name\":\"kube-system\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Namespace kube-system is reserved"));
+    }
+
+    @Test
+    void namespaces_uppercaseName_isRejected() throws Exception {
+        mockMvc.perform(post("/api/namespaces")
+                        .param("cluster", "demo")
+                        .contentType(MediaType.APPLICATION_JSON_VALUE)
+                        .content("{\"name\":\"Shop\"}"))
+                .andExpect(status().isBadRequest());
     }
 
     @Test

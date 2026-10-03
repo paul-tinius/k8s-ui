@@ -3,6 +3,7 @@ package com.paultinius.k8s.dashboard.cluster;
 import com.paultinius.k8s.dashboard.forward.OpenForward;
 import com.paultinius.k8s.dashboard.model.ClusterInfo;
 import com.paultinius.k8s.dashboard.model.LogPage;
+import com.paultinius.k8s.dashboard.model.NamespaceView;
 import com.paultinius.k8s.dashboard.model.Overview;
 import com.paultinius.k8s.dashboard.model.ResourceDetail;
 import com.paultinius.k8s.dashboard.model.ResourceView;
@@ -15,6 +16,12 @@ public interface ClusterClient extends AutoCloseable {
     ClusterInfo info();
 
     List<String> namespaces();
+
+    List<NamespaceView> namespaceDetails();
+
+    void createNamespace(String name);
+
+    void deleteNamespace(String name);
 
     Overview overview(Set<String> namespaces);
 
@@ -29,6 +36,8 @@ public interface ClusterClient extends AutoCloseable {
     void rolloutRestart(String namespace, String name);
 
     void deletePod(String namespace, String name);
+
+    void deleteResource(ResourceKind kind, String namespace, String name);
 
     LogPage logs(LogRequest request);
 

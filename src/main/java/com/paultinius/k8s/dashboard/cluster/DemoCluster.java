@@ -6,6 +6,7 @@ import com.paultinius.k8s.dashboard.model.ClusterInfo;
 import com.paultinius.k8s.dashboard.model.ForwardView;
 import com.paultinius.k8s.dashboard.model.LogLine;
 import com.paultinius.k8s.dashboard.model.LogPage;
+import com.paultinius.k8s.dashboard.model.NamespaceView;
 import com.paultinius.k8s.dashboard.model.Overview;
 import com.paultinius.k8s.dashboard.model.ResourceDetail;
 import com.paultinius.k8s.dashboard.model.ResourceView;
@@ -19,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -35,6 +37,7 @@ public final class DemoCluster implements ClusterClient {
     private final List<ConfigMapObj> configMaps = new ArrayList<>();
     private final List<NodeObj> nodes = new ArrayList<>();
     private final List<EventObj> events = new ArrayList<>();
+    private final Set<String> namespaceNames = new TreeSet<>();
     private final AtomicInteger ports = new AtomicInteger(18080);
     private int sequence = 100;
     private Consumer<String> listener = id -> { };
@@ -55,8 +58,44 @@ public final class DemoCluster implements ClusterClient {
     @Override
     public List<String> namespaces() {
         synchronized (lock) {
-            return deployments.stream().map(item -> item.namespace).distinct().sorted().toList();
+            return List.copyOf(namespaceNames);
         }
+    }
+
+    @Override
+    public List<NamespaceView> namespaceDetails() {
+        synchronized (lock) {
+            return namespaceNames.stream()
+                    .map(name -> new NamespaceView(name, "Active", NamespaceNames.deletable(name)))
+                    .toList();
+        }
+    }
+
+    @Override
+    public void createNamespace(String name) {
+        String namespace = NamespaceNames.requireCreatable(name);
+        synchronized (lock) {
+            if (!namespaceNames.add(namespace)) {
+                throw DashboardException.badRequest("Namespace " + namespace + " already exists");
+            }
+        }
+        changed();
+    }
+
+    @Override
+    public void deleteNamespace(String name) {
+        String namespace = NamespaceNames.requireDeletable(name);
+        synchronized (lock) {
+            if (!namespaceNames.remove(namespace)) {
+                throw DashboardException.notFound("Namespace " + namespace + " was not found");
+            }
+            deployments.removeIf(item -> item.namespace.equals(namespace));
+            standalonePods.removeIf(item -> item.namespace.equals(namespace));
+            services.removeIf(item -> item.namespace.equals(namespace));
+            configMaps.removeIf(item -> item.namespace.equals(namespace));
+            events.removeIf(item -> item.namespace.equals(namespace));
+        }
+        changed();
     }
 
     @Override
@@ -90,10 +129,8 @@ public final class DemoCluster implements ClusterClient {
             int warnings = (int) events.stream()
                     .filter(event -> "Warning".equals(event.type) && inScope(event.namespace, namespaces))
                     .count();
-            int namespaceCount = (int) deployments.stream()
-                    .map(item -> item.namespace)
+            int namespaceCount = (int) namespaceNames.stream()
                     .filter(name -> inScope(name, namespaces))
-                    .distinct()
                     .count();
             return new Overview(
                     "demo",
@@ -238,6 +275,36 @@ public final class DemoCluster implements ClusterClient {
     }
 
     @Override
+    public void deleteResource(ResourceKind kind, String namespace, String name) {
+        switch (kind) {
+            case POD -> deletePod(namespace, name);
+            case NODE, EVENT -> throw DashboardException.badRequest(kind.apiName() + " cannot be deleted");
+            case DEPLOYMENT, SERVICE, CONFIG_MAP -> deleteStoredResource(kind, namespace, name);
+        }
+    }
+
+    private void deleteStoredResource(ResourceKind kind, String namespace, String name) {
+        synchronized (lock) {
+            switch (kind) {
+                case DEPLOYMENT -> {
+                    deployment(namespace, name);
+                    deployments.removeIf(item -> item.namespace.equals(namespace) && item.name.equals(name));
+                }
+                case SERVICE -> {
+                    service(namespace, name);
+                    services.removeIf(item -> item.namespace.equals(namespace) && item.name.equals(name));
+                }
+                case CONFIG_MAP -> {
+                    configMap(namespace, name);
+                    configMaps.removeIf(item -> item.namespace.equals(namespace) && item.name.equals(name));
+                }
+                case POD, NODE, EVENT -> throw DashboardException.badRequest(kind.apiName() + " cannot be deleted");
+            }
+        }
+        changed();
+    }
+
+    @Override
     public LogPage logs(LogRequest request) {
         synchronized (lock) {
             List<Pod> selected = new ArrayList<>();
@@ -327,6 +394,7 @@ public final class DemoCluster implements ClusterClient {
         data.forEach((key, value) -> values.put(key, String.valueOf(value)));
         configMaps.removeIf(item -> item.namespace.equals(namespace) && item.name.equals(name));
         configMaps.add(new ConfigMapObj(namespace, name, values, Instant.now()));
+        rememberNamespace(namespace);
     }
 
     private void upsertDeployment(String namespace, String name, Map<String, Object> document) {
@@ -346,6 +414,7 @@ public final class DemoCluster implements ClusterClient {
         );
         resize(deployment);
         deployments.add(deployment);
+        rememberNamespace(namespace);
     }
 
     private void upsertService(String namespace, String name, Map<String, Object> document) {
@@ -363,16 +432,59 @@ public final class DemoCluster implements ClusterClient {
                 stringMap(YamlMaps.child(spec, "selector")),
                 Instant.now()
         ));
+        rememberNamespace(namespace);
     }
 
     private void upsertPod(String namespace, String name, Map<String, Object> document) {
+        for (Deployment deployment : deployments) {
+            if (!deployment.namespace.equals(namespace)) {
+                continue;
+            }
+            for (int index = 0; index < deployment.pods.size(); index++) {
+                if (deployment.pods.get(index).name.equals(name)) {
+                    deployment.pods.set(index, reappliedPod(deployment.pods.get(index), document));
+                    return;
+                }
+            }
+        }
+        standalonePods.removeIf(item -> item.namespace.equals(namespace) && item.name.equals(name));
+        standalonePods.add(appliedPod(namespace, name, null, document));
+        rememberNamespace(namespace);
+    }
+
+    private Pod reappliedPod(Pod existing, Map<String, Object> document) {
         Map<String, Object> spec = YamlMaps.child(document, "spec");
         Map<String, Object> container = firstContainer(spec);
-        standalonePods.removeIf(item -> item.namespace.equals(namespace) && item.name.equals(name));
-        standalonePods.add(new Pod(
+        String containerName = textOr(container, "name", existing.container);
+        if (!containerName.equals(existing.container)) {
+            throw DashboardException.badRequest("Container name of pod " + existing.name + " cannot be changed");
+        }
+        return new Pod(
+                existing.namespace,
+                existing.name,
+                existing.owner,
+                textOr(spec, "nodeName", existing.node),
+                textOr(container, "image", existing.image),
+                containerName,
+                existing.status,
+                existing.ready,
+                existing.desired,
+                labelsOr(YamlMaps.child(document, "metadata"), existing.name),
+                existing.created,
+                existing.logs,
+                existing.cpu,
+                existing.memory,
+                existing.restarts
+        );
+    }
+
+    private Pod appliedPod(String namespace, String name, String owner, Map<String, Object> document) {
+        Map<String, Object> spec = YamlMaps.child(document, "spec");
+        Map<String, Object> container = firstContainer(spec);
+        return new Pod(
                 namespace,
                 name,
-                null,
+                owner,
                 textOr(spec, "nodeName", "node-a"),
                 textOr(container, "image", "example/app:latest"),
                 textOr(container, "name", "app"),
@@ -385,7 +497,7 @@ public final class DemoCluster implements ClusterClient {
                 "10m",
                 "64Mi",
                 0
-        ));
+        );
     }
 
     private Map<String, Object> firstContainer(Map<String, Object> spec) {
@@ -648,6 +760,9 @@ public final class DemoCluster implements ClusterClient {
     }
 
     private String serviceYaml(ServiceObj service) {
+        String[] ports = service.ports.split(":", 2);
+        String targetPort = ports.length > 1 ? ports[1] : ports[0];
+        String selector = service.selector.isEmpty() ? "  selector: {}" : "  selector:\n" + labelYaml(service.selector);
         return """
                 apiVersion: v1
                 kind: Service
@@ -659,7 +774,9 @@ public final class DemoCluster implements ClusterClient {
                   clusterIP: %s
                   ports:
                     - port: %s
-                """.formatted(service.name, service.namespace, service.type, service.clusterIp, service.ports.replace(':', ' '));
+                      targetPort: %s
+                %s
+                """.formatted(service.name, service.namespace, service.type, service.clusterIp, ports[0], targetPort, selector);
     }
 
     private String configMapYaml(ConfigMapObj configMap) {
@@ -751,6 +868,21 @@ public final class DemoCluster implements ClusterClient {
                 "Pod/storefront-a",
                 created.plus(1, ChronoUnit.MINUTES)
         ));
+        rememberSeedNamespaces();
+    }
+
+    private void rememberSeedNamespaces() {
+        deployments.forEach(item -> rememberNamespace(item.namespace));
+        services.forEach(item -> rememberNamespace(item.namespace));
+        configMaps.forEach(item -> rememberNamespace(item.namespace));
+        events.forEach(item -> rememberNamespace(item.namespace));
+        standalonePods.forEach(item -> rememberNamespace(item.namespace));
+    }
+
+    private void rememberNamespace(String namespace) {
+        if (namespace != null && !namespace.isBlank()) {
+            namespaceNames.add(namespace);
+        }
     }
 
     private void renameSeedPods() {

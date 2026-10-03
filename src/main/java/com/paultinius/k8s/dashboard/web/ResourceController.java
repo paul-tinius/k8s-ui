@@ -102,6 +102,17 @@ public class ResourceController {
         return Map.of("status", "restarted");
     }
 
+    @DeleteMapping("/resources/{kind}/{namespace}/{name}")
+    public Map<String, String> deleteResource(
+            @RequestParam(required = false) String cluster,
+            @PathVariable String kind,
+            @PathVariable String namespace,
+            @PathVariable String name
+    ) {
+        clusters.require(cluster).deleteResource(ResourceKind.from(kind), QuerySupport.scope(namespace), name);
+        return Map.of("status", "deleted");
+    }
+
     @DeleteMapping("/pods/{namespace}/{name}")
     public Map<String, String> deletePod(
             @RequestParam(required = false) String cluster,
