@@ -239,4 +239,15 @@ class DemoClusterTest {
                 .isEqualTo("CrashLoopBackOff");
         assertThat(cluster.overview(Set.of("payments")).attention()).anyMatch(item -> "ledger-a".equals(item.name()));
     }
+
+    @Test
+    void applyYaml_renamedContainerOfOwnedPod_isRejected() {
+        var detail = cluster.detail(ResourceKind.POD, "payments", "ledger-a");
+        String yaml = detail.yaml().replace("- name: ledger\n", "- name: ledger-v2\n");
+
+        assertThat(yaml).contains("ledger-v2");
+        assertThatThrownBy(() -> cluster.applyYaml(yaml))
+                .isInstanceOf(DashboardException.class)
+                .hasMessageContaining("cannot be changed");
+    }
 }

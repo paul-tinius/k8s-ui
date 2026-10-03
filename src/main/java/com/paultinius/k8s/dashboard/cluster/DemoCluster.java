@@ -455,13 +455,17 @@ public final class DemoCluster implements ClusterClient {
     private Pod reappliedPod(Pod existing, Map<String, Object> document) {
         Map<String, Object> spec = YamlMaps.child(document, "spec");
         Map<String, Object> container = firstContainer(spec);
+        String containerName = textOr(container, "name", existing.container);
+        if (!containerName.equals(existing.container)) {
+            throw DashboardException.badRequest("Container name of pod " + existing.name + " cannot be changed");
+        }
         return new Pod(
                 existing.namespace,
                 existing.name,
                 existing.owner,
                 textOr(spec, "nodeName", existing.node),
                 textOr(container, "image", existing.image),
-                textOr(container, "name", existing.container),
+                containerName,
                 existing.status,
                 existing.ready,
                 existing.desired,
