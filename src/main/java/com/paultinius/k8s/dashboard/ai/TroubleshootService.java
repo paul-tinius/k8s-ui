@@ -5,12 +5,14 @@ import com.paultinius.k8s.dashboard.cluster.ClusterRegistry;
 import com.paultinius.k8s.dashboard.cluster.LogRequest;
 import com.paultinius.k8s.dashboard.cluster.ResourceKind;
 import com.paultinius.k8s.dashboard.config.DashboardProperties;
+import com.paultinius.k8s.dashboard.error.DashboardException;
 import com.paultinius.k8s.dashboard.model.AskResponse;
 import com.paultinius.k8s.dashboard.model.LogLine;
 import com.paultinius.k8s.dashboard.model.LogPage;
 import com.paultinius.k8s.dashboard.model.ResourceDetail;
 import org.springframework.stereotype.Service;
 
+import java.net.URI;
 import java.util.Set;
 
 @Service
@@ -34,7 +36,20 @@ public class TroubleshootService {
         this.properties = properties;
     }
 
-    public AskResponse ask(String clusterId, String namespace, String kind, String name, String question, boolean includeLogs) {
+    public AskResponse ask(
+            String clusterId,
+            String namespace,
+            String kind,
+            String name,
+            String question,
+            boolean includeLogs,
+            String provider,
+            String baseUrl,
+            String modelName,
+            String apiKey,
+            String orgId
+    ) {
+        ModelRequest model = resolve(provider, baseUrl, modelName, apiKey, orgId);
         ClusterClient cluster = clusters.require(clusterId);
         ResourceDetail detail = null;
         if (kind != null && !kind.isBlank() && name != null && !name.isBlank()) {
@@ -44,13 +59,76 @@ public class TroubleshootService {
         if (includeLogs && detail != null) {
             logs = logsFor(cluster, detail);
         }
-        String provider = properties.getAi().getProvider();
-        String model = properties.getAi().getModel();
-        if (!client.configured()) {
-            return new AskResponse(false, "local", model, local.assess(provider, model, question, detail, logs));
+        if (!usable(model)) {
+            return new AskResponse(false, "local", model.model(), local.assess(model.provider(), model.model(), question, detail, logs));
         }
-        String answer = client.complete(SYSTEM, prompt(cluster, detail, logs, question));
-        return new AskResponse(true, provider, model, answer);
+        String answer = client.complete(model, SYSTEM, prompt(cluster, detail, logs, question));
+        return new AskResponse(true, model.provider(), model.model(), answer);
+    }
+
+    private ModelRequest resolve(String provider, String baseUrl, String modelName, String apiKey, String orgId) {
+        DashboardProperties.Ai server = properties.getAi();
+        String name = provider == null ? "" : provider.trim();
+        String base = baseUrl == null ? "" : baseUrl.trim();
+        String chosenModel = modelName == null ? "" : modelName.trim();
+        String key = apiKey == null ? "" : apiKey.trim();
+        String org = orgId == null ? "" : orgId.trim();
+        if (name.isBlank() && base.isBlank() && key.isBlank()) {
+            return new ModelRequest("off", "", "", "", "", server.getTimeout());
+        }
+        if (base.isBlank()) {
+            throw DashboardException.badRequest("Base URL is required");
+        }
+        requireHttp(base);
+        if (chosenModel.isBlank()) {
+            chosenModel = server.getModel() == null ? "" : server.getModel().trim();
+        }
+        if (name.isBlank()) {
+            name = "custom";
+        }
+        if (devin(name, base) && org.isBlank()) {
+            throw DashboardException.badRequest("Devin organization id is required");
+        }
+        if (!devin(name, base)) {
+            org = "";
+        }
+        return new ModelRequest(name, base, chosenModel, key, org, server.getTimeout());
+    }
+
+    private static void requireHttp(String base) {
+        URI uri;
+        try {
+            uri = URI.create(base);
+        } catch (RuntimeException exception) {
+            throw DashboardException.badRequest("Base URL is invalid");
+        }
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme();
+        if (!"https".equalsIgnoreCase(scheme) && !"http".equalsIgnoreCase(scheme)) {
+            throw DashboardException.badRequest("Base URL must be http or https");
+        }
+        if (uri.getHost() == null || uri.getHost().isBlank()) {
+            throw DashboardException.badRequest("Base URL is invalid");
+        }
+    }
+
+    private static boolean devin(String provider, String baseUrl) {
+        if ("devin".equalsIgnoreCase(provider)) {
+            return true;
+        }
+        try {
+            String host = URI.create(baseUrl).getHost();
+            return host != null && "api.devin.ai".equalsIgnoreCase(host);
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private static boolean usable(ModelRequest model) {
+        if (model.apiKey() != null && !model.apiKey().isBlank()) {
+            return true;
+        }
+        String base = model.baseUrl() == null ? "" : model.baseUrl();
+        return base.startsWith("http://127.0.0.1") || base.startsWith("http://localhost");
     }
 
     private static LogPage logsFor(ClusterClient cluster, ResourceDetail detail) {

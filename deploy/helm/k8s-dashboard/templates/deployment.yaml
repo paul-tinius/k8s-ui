@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "k8s-dashboard.fullname" . }}
+  labels:
+    {{- include "k8s-dashboard.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "k8s-dashboard.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "k8s-dashboard.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or (eq (include "k8s-dashboard.managedSecret" .) "true") .Values.podAnnotations }}
+      annotations:
+        {{- if eq (include "k8s-dashboard.managedSecret" .) "true" }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "k8s-dashboard.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: dashboard
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: DASHBOARD_CLUSTER_IN_CLUSTER
+              value: {{ .Values.dashboard.inCluster | quote }}
+            - name: DASHBOARD_CLUSTER_DEMO_ENABLED
+              value: {{ .Values.dashboard.demoEnabled | quote }}
+            - name: DASHBOARD_CLUSTER_LOAD_DEFAULT_KUBECONFIG
+              value: {{ .Values.dashboard.loadDefaultKubeconfig | quote }}
+            - name: DASHBOARD_CLUSTER_DATA_DIR
+              value: {{ .Values.dashboard.dataDir | quote }}
+            - name: DASHBOARD_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "k8s-dashboard.secretName" . }}
+                  key: {{ .Values.secret.tokenKey }}
+                  optional: {{ eq (include "k8s-dashboard.managedSecret" .) "false" }}
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "k8s-dashboard.secretName" . }}
+                  key: {{ .Values.secret.apiKeyKey }}
+                  optional: {{ eq (include "k8s-dashboard.managedSecret" .) "false" }}
+            {{- range $index, $path := .Values.dashboard.kubeconfigs }}
+            - name: DASHBOARD_CLUSTER_KUBECONFIGS_{{ $index }}
+              value: {{ $path | quote }}
+            {{- end }}
+            {{- if .Values.ai.model }}
+            - name: DASHBOARD_AI_MODEL
+              value: {{ .Values.ai.model | quote }}
+            {{- end }}
+            {{- if .Values.ai.baseUrl }}
+            - name: DASHBOARD_AI_BASE_URL
+              value: {{ .Values.ai.baseUrl | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.dashboard.dataDir | quote }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "k8s-dashboard.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

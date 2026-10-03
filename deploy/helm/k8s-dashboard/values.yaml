@@ -1,0 +1,126 @@
+# Defaults match deploy/kubernetes/dashboard.yaml.
+# Install into the k8s-dashboard namespace:
+#   helm upgrade --install k8s-dashboard deploy/helm/k8s-dashboard \
+#     --namespace k8s-dashboard --create-namespace
+
+replicaCount: 1
+
+image:
+  repository: k8s-dashboard
+  # Empty uses the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # Empty uses the release fullname.
+  name: ""
+
+rbac:
+  create: true
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# Same requests and limits as deploy/kubernetes/dashboard.yaml.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+dashboard:
+  inCluster: true
+  demoEnabled: false
+  loadDefaultKubeconfig: false
+  dataDir: /data
+  # Paths inside the pod. Each entry becomes DASHBOARD_CLUSTER_KUBECONFIGS_<index>.
+  kubeconfigs: []
+
+auth:
+  # Set to create a Secret key. Leave empty to keep the reference optional.
+  token: ""
+
+ai:
+  apiKey: ""
+  # Empty leaves the image and application defaults (grok-4.7 at https://api.x.ai/v1).
+  model: ""
+  baseUrl: ""
+
+secret:
+  # Use a Secret you created yourself. Keys default to token and xai-api-key.
+  existingSecret: ""
+  tokenKey: token
+  apiKeyKey: xai-api-key
+
+# Uploaded kubeconfigs are stored on this volume. emptyDir is used when disabled,
+# so more than one replica does not share saved kubeconfigs.
+persistence:
+  enabled: false
+  size: 1Gi
+  # Empty uses the cluster default. "-" sets an empty storageClassName.
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+# Reach the Service from outside the cluster with Ingress or Istio, not both.
+# Leave both disabled to use only the in-cluster Service.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: dashboard.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+istio:
+  enabled: false
+  # Empty creates a Gateway that selects the Istio ingress gateway.
+  # Set namespace/name to use a Gateway that already exists.
+  gateway: ""
+  selector:
+    istio: ingressgateway
+  hosts:
+    - dashboard.local
+  tls:
+    enabled: false
+    mode: SIMPLE
+    credentialName: ""
+    httpsRedirect: true
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []

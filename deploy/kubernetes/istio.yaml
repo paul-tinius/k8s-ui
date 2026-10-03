@@ -1,0 +1,34 @@
+# HTTP access through the Istio ingress gateway.
+# Apply this or deploy/kubernetes/ingress.yaml, not both.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: k8s-dashboard
+  namespace: k8s-dashboard
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - dashboard.local
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: k8s-dashboard
+  namespace: k8s-dashboard
+spec:
+  hosts:
+    - dashboard.local
+  gateways:
+    - k8s-dashboard
+  http:
+    - route:
+        - destination:
+            host: k8s-dashboard
+            port:
+              number: 8080

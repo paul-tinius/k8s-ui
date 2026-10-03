@@ -1,3 +1,5 @@
+# Workload only. For outside access, also apply deploy/kubernetes/ingress.yaml
+# or deploy/kubernetes/istio.yaml, not both.
 apiVersion: v1
 kind: Namespace
 metadata:

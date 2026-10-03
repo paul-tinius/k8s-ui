@@ -38,6 +38,18 @@ tasks.named('bootJar') {
     archiveFileName = 'k8s-dashboard.jar'
 }
 
+def dockerImage = "${rootProject.name}:${version}"
+
+tasks.register('dockerBuild', Exec) {
+    group = 'build'
+    description = "Build the ${dockerImage} image from the Dockerfile."
+    commandLine 'docker', 'build', '--tag', dockerImage, '.'
+}
+
+tasks.named('assemble') {
+    dependsOn 'dockerBuild'
+}
+
 test {
     useJUnitPlatform()
     testLogging {

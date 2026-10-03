@@ -1,3 +1,11 @@
+const AI_KEYS = {
+  name: "k8s-dashboard-ai-provider",
+  baseUrl: "k8s-dashboard-ai-base-url",
+  model: "k8s-dashboard-ai-model",
+  apiKey: "k8s-dashboard-ai-key",
+  org: "k8s-dashboard-ai-org"
+};
+
 const state = {
   token: sessionStorage.getItem("k8s-dashboard-token") || "",
   clusters: [],
@@ -14,7 +22,12 @@ const state = {
   live: true,
   logs: { deployment: "", pod: "", container: "", tail: "100", q: "", lines: [] },
   forwards: [],
-  ai: { status: null, presets: [], question: "Why is this unhealthy?", includeLogs: true, answer: "", busy: false },
+  ai: Object.assign({
+    question: "Why is this unhealthy?",
+    includeLogs: true,
+    answer: "",
+    busy: false
+  }, loadAiSettings()),
   notice: "",
   source: null,
   timer: 0
@@ -32,6 +45,60 @@ const tabs = {
   forwards: "Forwards",
   assist: "Assist"
 };
+
+function storageGet(store, key) {
+  try {
+    return store.getItem(key);
+  } catch (error) {
+    return null;
+  }
+}
+
+function storageSet(store, key, value) {
+  try {
+    store.setItem(key, value);
+  } catch (error) {
+    /* Private browsing can reject localStorage. The fields still work for this page. */
+  }
+}
+
+function loadAiSettings() {
+  if (storageGet(localStorage, AI_KEYS.name) === null
+      && storageGet(localStorage, AI_KEYS.baseUrl) === null
+      && storageGet(localStorage, AI_KEYS.model) === null
+      && storageGet(localStorage, AI_KEYS.apiKey) === null) {
+    migrateAiSettings();
+  }
+  return {
+    providerName: storageGet(localStorage, AI_KEYS.name) || "",
+    baseUrl: storageGet(localStorage, AI_KEYS.baseUrl) || "",
+    model: storageGet(localStorage, AI_KEYS.model) || "",
+    apiKey: storageGet(localStorage, AI_KEYS.apiKey) || "",
+    orgId: storageGet(localStorage, AI_KEYS.org) || ""
+  };
+}
+
+// Older builds stored a preset id in sessionStorage. Copy it once into localStorage.
+function migrateAiSettings() {
+  const known = {
+    xai: ["Grok", "https://api.x.ai/v1", "grok-4.7"],
+    openai: ["OpenAI", "https://api.openai.com/v1", "gpt-4.1"],
+    "openrouter-claude": ["Claude", "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4"],
+    "openrouter-gemini": ["Gemini", "https://openrouter.ai/api/v1", "google/gemini-2.5-pro"],
+    deepseek: ["DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"],
+    qwen: ["Qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"],
+    ollama: ["Ollama", "http://127.0.0.1:11434/v1", "llama3.1"],
+    lmstudio: ["LM Studio", "http://127.0.0.1:1234/v1", "local-model"],
+    devin: ["Devin", "https://api.devin.ai/v3", "lite"]
+  };
+  const preset = storageGet(sessionStorage, "k8s-dashboard-ai-preset");
+  const match = preset ? known[preset] : null;
+  storageSet(localStorage, AI_KEYS.name, match ? match[0] : "");
+  storageSet(localStorage, AI_KEYS.baseUrl, match ? match[1] : "");
+  storageSet(localStorage, AI_KEYS.model, match ? match[2] : "");
+  storageSet(localStorage, AI_KEYS.apiKey, match ? (storageGet(sessionStorage, "k8s-dashboard-ai-key") || "") : "");
+  storageSet(localStorage, AI_KEYS.org, preset === "devin" ? (storageGet(sessionStorage, "k8s-dashboard-ai-org") || "") : "");
+}
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -176,18 +243,42 @@ function paintShell() {
     document.getElementById("forward-form").addEventListener("submit", openForward);
   } else if (state.tab === "assist") {
     view.innerHTML = `
-      <div class="panel">
+      <div class="panel assist">
         <h2>Assist</h2>
         <p id="ai-status" class="muted"></p>
+        <label>Provider name <input id="ai-provider" autocomplete="off" maxlength="80" placeholder="Grok" value="${esc(state.ai.providerName)}"></label>
+        <label>Base URL <input id="ai-base-url" autocomplete="off" maxlength="500" placeholder="https://api.x.ai/v1" value="${esc(state.ai.baseUrl)}"></label>
+        <label>Model <input id="ai-model" autocomplete="off" maxlength="120" placeholder="grok-4.7" value="${esc(state.ai.model)}"></label>
+        <label>API key
+          <div class="secret">
+            <input id="ai-key" type="password" autocomplete="off" maxlength="512" value="${esc(state.ai.apiKey)}">
+            <button type="button" id="ai-key-toggle" aria-label="Show API key" aria-pressed="false">
+              <svg class="eye-on" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></svg>
+              <svg class="eye-off" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.5 6.2A10.6 10.6 0 0 1 12 6c6.5 0 10 6 10 6a18 18 0 0 1-3.1 3.7"/><path d="M6.2 6.8C3.9 8.4 2 12 2 12s3.5 6 10 6c1.1 0 2.2-.2 3.2-.6"/><path d="M9.9 9.9a2.5 2.5 0 0 0 3.6 3.6"/></svg>
+            </button>
+          </div>
+        </label>
+        <label id="ai-org-field" class="${usingDevin() ? "" : "hidden"}">Devin organization id <input id="ai-org" autocomplete="off" placeholder="org-..." value="${esc(state.ai.orgId)}">
+          <span class="muted">From Settings, then Devin API.</span>
+        </label>
+        <p class="muted">The provider name, base URL, model, and API key stay in this browser and are sent only with Ask. Leave them blank for a local check.</p>
         <label>Question <textarea id="ai-question">${esc(state.ai.question)}</textarea></label>
         <label class="inline"><input id="ai-logs" type="checkbox" ${state.ai.includeLogs ? "checked" : ""}> Include recent logs</label>
-        <div class="actions"><button class="primary" id="ai-ask" type="button">Ask</button></div>
-        <pre id="ai-answer" class="answer"></pre>
-        <h3>Server-side providers</h3>
-        <p class="muted">Keys stay on the server. Change DASHBOARD_AI_BASE_URL, DASHBOARD_AI_MODEL, and the API key environment variable, then restart.</p>
-        <table class="presets" id="preset-table"></table>
+        <div class="actions">
+          <button class="primary" id="ai-ask" type="button">Ask</button>
+          <button type="button" id="ai-copy">Copy answer</button>
+        </div>
+        <textarea id="ai-answer" class="answer" readonly aria-label="Assist answer"></textarea>
       </div>`;
+    document.getElementById("ai-provider").addEventListener("input", saveAiChoice);
+    document.getElementById("ai-base-url").addEventListener("input", saveAiChoice);
+    document.getElementById("ai-model").addEventListener("input", saveAiChoice);
+    document.getElementById("ai-key").addEventListener("input", saveAiChoice);
+    document.getElementById("ai-key-toggle").addEventListener("click", toggleApiKey);
+    document.getElementById("ai-org").addEventListener("input", saveAiChoice);
     document.getElementById("ai-ask").addEventListener("click", ask);
+    document.getElementById("ai-copy").addEventListener("click", copyAnswer);
+    toggleAiFields();
   } else if (state.tab === "overview") {
     view.innerHTML = `<div id="overview-cards" class="cards"></div><div class="split"><div class="panel"><h2>Attention</h2><div id="attention"></div></div><div class="panel"><h2>Pod metrics</h2><div id="metrics"></div></div></div>`;
   } else {
@@ -359,29 +450,125 @@ async function openForward(event) {
   }
 }
 
+function saveAiChoice() {
+  const provider = document.getElementById("ai-provider");
+  const baseUrl = document.getElementById("ai-base-url");
+  const model = document.getElementById("ai-model");
+  const key = document.getElementById("ai-key");
+  const org = document.getElementById("ai-org");
+  if (!provider || !baseUrl || !model || !key || !org) return;
+  state.ai.providerName = provider.value.trim();
+  state.ai.baseUrl = baseUrl.value.trim();
+  state.ai.model = model.value.trim();
+  state.ai.apiKey = key.value;
+  state.ai.orgId = org.value.trim();
+  storageSet(localStorage, AI_KEYS.name, state.ai.providerName);
+  storageSet(localStorage, AI_KEYS.baseUrl, state.ai.baseUrl);
+  storageSet(localStorage, AI_KEYS.model, state.ai.model);
+  storageSet(localStorage, AI_KEYS.apiKey, state.ai.apiKey);
+  storageSet(localStorage, AI_KEYS.org, state.ai.orgId);
+  toggleAiFields();
+  paintAssist();
+}
+
+function usingDevin() {
+  if (state.ai.providerName.trim().toLowerCase() === "devin") return true;
+  try {
+    return new URL(state.ai.baseUrl).hostname.toLowerCase() === "api.devin.ai";
+  } catch (error) {
+    return false;
+  }
+}
+
+function toggleApiKey() {
+  const input = document.getElementById("ai-key");
+  const button = document.getElementById("ai-key-toggle");
+  if (!input || !button) return;
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  button.setAttribute("aria-pressed", show ? "true" : "false");
+  button.setAttribute("aria-label", show ? "Hide API key" : "Show API key");
+}
+
+function toggleAiFields() {
+  const devin = usingDevin();
+  const orgField = document.getElementById("ai-org-field");
+  const org = document.getElementById("ai-org");
+  if (orgField) orgField.classList.toggle("hidden", !devin);
+  if (org) org.required = devin;
+}
+
 function paintAssist() {
-  const status = state.ai.status;
   const statusHost = document.getElementById("ai-status");
-  if (statusHost && status) {
-    statusHost.textContent = status.configured
-      ? status.provider + " · " + status.model + " · " + status.baseUrlHost
-      : "No API key on the server. Local checks still run. Default model is " + status.provider + " " + status.model + ".";
+  if (statusHost) {
+    if (!state.ai.providerName && !state.ai.baseUrl && !state.ai.apiKey) {
+      statusHost.textContent = "Assist is off. Enter a provider name, base URL, and API key. They stay in this browser.";
+    } else if (!state.ai.baseUrl) {
+      statusHost.textContent = "Base URL is required. The provider name, base URL, and API key stay in this browser.";
+    } else {
+      let host = "";
+      try {
+        host = new URL(state.ai.baseUrl).host;
+      } catch (error) {
+        host = "";
+      }
+      const name = state.ai.providerName || "Custom";
+      const model = state.ai.model || "server model";
+      statusHost.textContent = name + " · " + model + (host ? " · " + host : "") + ". Saved in this browser.";
+    }
   }
-  const answer = document.getElementById("ai-answer");
-  if (answer) answer.textContent = state.ai.answer;
-  const table = document.getElementById("preset-table");
-  if (table) {
-    table.innerHTML = `<thead><tr><th>Provider</th><th>Base URL</th><th>Model</th><th>Key env</th></tr></thead><tbody>`
-      + state.ai.presets.map((preset) => `<tr><td>${esc(preset.label)}${preset.compatible ? "" : " (unavailable)"}</td><td>${esc(preset.baseUrl || preset.note)}</td><td>${esc(preset.model)}</td><td>${esc(preset.apiKeyEnv)}</td></tr>`).join("")
-      + `</tbody>`;
-  }
+  showAnswer();
+  const copy = document.getElementById("ai-copy");
+  if (copy) copy.disabled = state.ai.busy || !state.ai.answer;
   document.getElementById("counts").textContent = state.selection ? state.selection.kind + " " + state.selection.name : "No resource selected";
 }
 
+function showAnswer() {
+  const answer = document.getElementById("ai-answer");
+  if (!answer || answer.value === state.ai.answer) return;
+  answer.value = state.ai.answer;
+  answer.style.height = "auto";
+  answer.style.height = Math.max(answer.scrollHeight, 144) + "px";
+}
+
+async function copyAnswer() {
+  const text = state.ai.answer;
+  if (!text || state.ai.busy) return;
+  const box = document.getElementById("ai-answer");
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      if (!box) return;
+      box.focus();
+      box.select();
+      document.execCommand("copy");
+    }
+    const button = document.getElementById("ai-copy");
+    if (!button) return;
+    button.textContent = "Copied";
+    window.setTimeout(() => {
+      if (button.textContent === "Copied") button.textContent = "Copy answer";
+    }, 1200);
+  } catch (error) {
+    if (box) {
+      box.focus();
+      box.select();
+    }
+    notice("Select the answer and copy it");
+  }
+}
+
 async function ask() {
+  saveAiChoice();
   state.ai.question = document.getElementById("ai-question").value.trim();
   state.ai.includeLogs = document.getElementById("ai-logs").checked;
   if (!state.ai.question) return;
+  if (usingDevin() && !state.ai.orgId) {
+    state.ai.answer = "Devin organization id is required";
+    paintAssist();
+    return;
+  }
   state.ai.busy = true;
   state.ai.answer = "Asking…";
   paintAssist();
@@ -394,7 +581,12 @@ async function ask() {
         kind: state.selection ? state.selection.kind : "",
         name: state.selection ? state.selection.name : "",
         question: state.ai.question,
-        includeLogs: state.ai.includeLogs
+        includeLogs: state.ai.includeLogs,
+        provider: state.ai.providerName,
+        baseUrl: state.ai.baseUrl,
+        model: state.ai.model,
+        apiKey: state.ai.apiKey,
+        orgId: usingDevin() ? state.ai.orgId : ""
       })
     });
     state.ai.answer = (response.modelUsed ? response.provider + " · " + response.model + "\n\n" : "") + response.answer;
@@ -561,7 +753,8 @@ function openClusters() {
     <h2>Clusters</h2>
     ${rows || "<p>No clusters.</p>"}
     <h3>Add kubeconfig</h3>
-    <p class="muted">Stored under the server data directory with user-only permissions. Every context becomes a cluster. The file is not sent to a model.</p>
+    <p class="muted">Paste the YAML or choose a file. Stored under the server data directory with user-only permissions. Every context becomes a cluster. The file is not sent to a model.</p>
+    <label class="cluster-file">Kubeconfig file <input id="cluster-file" type="file" accept=".yml,.yaml,.conf,.kubeconfig,text/yaml,application/yaml,text/plain"></label>
     <input id="cluster-name" placeholder="Display name for a single context">
     <textarea id="cluster-kubeconfig" placeholder="apiVersion: v1&#10;kind: Config"></textarea>
     <div class="actions"><button class="primary" id="cluster-add" type="button">Add</button><button type="button" id="modal-close">Close</button></div>`);
@@ -583,6 +776,10 @@ function openClusters() {
     await loadNamespaces(true);
     refresh();
   }));
+  document.getElementById("cluster-file").addEventListener("change", (event) => {
+    const file = event.target.files && event.target.files[0];
+    loadKubeconfigFile(file);
+  });
   document.getElementById("cluster-add").addEventListener("click", async () => {
     try {
       await api("/api/clusters", {
@@ -600,6 +797,33 @@ function openClusters() {
       notice(error.message);
     }
   });
+}
+
+async function loadKubeconfigFile(file) {
+  if (!file) return;
+  let text = "";
+  try {
+    text = await file.text();
+  } catch (error) {
+    notice("Could not read the kubeconfig file");
+    return;
+  }
+  if (!text.trim()) {
+    notice("That kubeconfig file is empty");
+    return;
+  }
+  if (text.length > 1000000) {
+    notice("That kubeconfig is larger than 1 MB");
+    return;
+  }
+  const box = document.getElementById("cluster-kubeconfig");
+  const name = document.getElementById("cluster-name");
+  if (box) box.value = text;
+  const stem = file.name.replace(/\.[^.]+$/, "");
+  if (name && !name.value.trim() && stem && stem.toLowerCase() !== "config") {
+    name.value = stem;
+  }
+  notice("");
 }
 
 function closeModal() {
@@ -630,12 +854,122 @@ function hideGate() {
 
 async function boot() {
   hideGate();
-  state.ai.status = await api("/api/ai/status");
-  state.ai.presets = await api("/api/ai/presets");
   await loadClusters();
   if (state.clusterId) await loadNamespaces(true);
   await refresh();
   connectLive();
+}
+
+const PANEL_LIMITS = {
+  namespaces: { min: 160, max: 520, fallback: 230, key: "k8s-dashboard-namespaces-width" },
+  detail: { min: 240, max: 760, fallback: 360, key: "k8s-dashboard-detail-width" }
+};
+const MAIN_MIN = 280;
+const panels = {
+  namespaces: PANEL_LIMITS.namespaces.fallback,
+  detail: PANEL_LIMITS.detail.fallback
+};
+
+function installSplitters() {
+  const workspace = document.getElementById("workspace");
+  if (!workspace) return;
+  restorePanelWidths(workspace);
+  bindSplitter(document.getElementById("split-namespaces"), "namespaces");
+  bindSplitter(document.getElementById("split-detail"), "detail");
+  window.addEventListener("resize", () => {
+    if (stackedLayout()) return;
+    applyPanelWidth(workspace, "namespaces", panels.namespaces);
+    applyPanelWidth(workspace, "detail", panels.detail);
+    rememberPanelWidths();
+  });
+}
+
+function bindSplitter(splitter, side) {
+  if (!splitter) return;
+  splitter.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || stackedLayout()) return;
+    event.preventDefault();
+    const workspace = document.getElementById("workspace");
+    splitter.classList.add("dragging");
+    document.body.classList.add("resizing");
+    if (splitter.setPointerCapture) splitter.setPointerCapture(event.pointerId);
+    const onMove = (move) => resizePanel(workspace, side, move.clientX);
+    const onUp = () => {
+      splitter.classList.remove("dragging");
+      document.body.classList.remove("resizing");
+      splitter.removeEventListener("pointermove", onMove);
+      splitter.removeEventListener("pointerup", onUp);
+      splitter.removeEventListener("pointercancel", onUp);
+      rememberPanelWidths();
+    };
+    splitter.addEventListener("pointermove", onMove);
+    splitter.addEventListener("pointerup", onUp);
+    splitter.addEventListener("pointercancel", onUp);
+  });
+  splitter.addEventListener("keydown", (event) => {
+    if (stackedLayout()) return;
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const step = event.shiftKey ? 48 : 16;
+    const delta = event.key === "ArrowLeft" ? -step : step;
+    const current = panels[side];
+    const next = side === "namespaces" ? current + delta : current - delta;
+    applyPanelWidth(document.getElementById("workspace"), side, next);
+    rememberPanelWidths();
+  });
+  splitter.addEventListener("dblclick", () => {
+    applyPanelWidth(document.getElementById("workspace"), side, PANEL_LIMITS[side].fallback);
+    rememberPanelWidths();
+  });
+}
+
+function resizePanel(workspace, side, clientX) {
+  const rect = workspace.getBoundingClientRect();
+  const width = side === "namespaces" ? clientX - rect.left : rect.right - clientX;
+  applyPanelWidth(workspace, side, width);
+}
+
+function applyPanelWidth(workspace, side, width) {
+  panels[side] = clampPanel(workspace, side, width);
+  const property = side === "namespaces" ? "--namespaces-width" : "--detail-width";
+  workspace.style.setProperty(property, panels[side] + "px");
+  const splitter = document.getElementById(side === "namespaces" ? "split-namespaces" : "split-detail");
+  if (!splitter) return;
+  splitter.setAttribute("aria-valuemin", String(PANEL_LIMITS[side].min));
+  splitter.setAttribute("aria-valuemax", String(PANEL_LIMITS[side].max));
+  splitter.setAttribute("aria-valuenow", String(panels[side]));
+}
+
+function clampPanel(workspace, side, width) {
+  const limit = PANEL_LIMITS[side];
+  const rounded = Math.round(Number(width));
+  if (!Number.isFinite(rounded)) return limit.fallback;
+  let max = limit.max;
+  const rect = workspace.getBoundingClientRect();
+  if (rect.width > 0) {
+    const other = side === "namespaces" ? panels.detail : panels.namespaces;
+    max = Math.min(max, Math.max(limit.min, rect.width - other - MAIN_MIN));
+  }
+  return Math.min(Math.max(rounded, limit.min), max);
+}
+
+function restorePanelWidths(workspace) {
+  applyPanelWidth(workspace, "namespaces", storedPanelWidth("namespaces"));
+  applyPanelWidth(workspace, "detail", storedPanelWidth("detail"));
+}
+
+function storedPanelWidth(side) {
+  const saved = Number(sessionStorage.getItem(PANEL_LIMITS[side].key));
+  return Number.isFinite(saved) && saved > 0 ? saved : PANEL_LIMITS[side].fallback;
+}
+
+function rememberPanelWidths() {
+  sessionStorage.setItem(PANEL_LIMITS.namespaces.key, String(panels.namespaces));
+  sessionStorage.setItem(PANEL_LIMITS.detail.key, String(panels.detail));
+}
+
+function stackedLayout() {
+  return window.matchMedia("(max-width: 980px)").matches;
 }
 
 document.getElementById("tabs").addEventListener("click", (event) => {
@@ -679,6 +1013,7 @@ document.getElementById("ns-all").addEventListener("click", () => {
 
 document.getElementById("apply-open").addEventListener("click", openApply);
 document.getElementById("clusters-open").addEventListener("click", openClusters);
+installSplitters();
 document.getElementById("gate-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   state.token = document.getElementById("gate-token").value;

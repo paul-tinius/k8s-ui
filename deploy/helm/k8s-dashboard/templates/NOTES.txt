@@ -1,0 +1,25 @@
+The dashboard Service is {{ include "k8s-dashboard.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}.
+
+Forward it to this machine:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "k8s-dashboard.fullname" . }} 8080:{{ .Values.service.port }}
+
+Then open http://127.0.0.1:8080
+{{- if .Values.ingress.enabled }}
+
+Ingress hosts:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- end }}
+{{- if .Values.istio.enabled }}
+
+Istio hosts:
+{{- range .Values.istio.hosts }}
+  http{{ if $.Values.istio.tls.enabled }}s{{ end }}://{{ . }}
+{{- end }}
+{{- end }}
+{{- if and (not .Values.auth.token) (not .Values.secret.existingSecret) }}
+
+No access token is set. API routes stay open until you set auth.token or create a Secret named {{ include "k8s-dashboard.secretName" . }} with an optional key {{ .Values.secret.tokenKey | quote }}.
+{{- end }}

@@ -1,0 +1,68 @@
+{{- include "k8s-dashboard.exclusiveAccess" . }}
+{{- if .Values.istio.enabled }}
+{{- if not .Values.istio.hosts }}
+{{- fail "istio.hosts must list at least one host" }}
+{{- end }}
+{{- $name := include "k8s-dashboard.fullname" . }}
+{{- $gateway := .Values.istio.gateway | default $name }}
+{{- if and (not .Values.istio.gateway) .Values.istio.tls.enabled (not .Values.istio.tls.credentialName) }}
+{{- fail "istio.tls.credentialName is required when istio.tls.enabled is true" }}
+{{- end }}
+{{- if not .Values.istio.gateway }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "k8s-dashboard.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- toYaml .Values.istio.selector | nindent 4 }}
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        {{- range .Values.istio.hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- if and .Values.istio.tls.enabled .Values.istio.tls.httpsRedirect }}
+      tls:
+        httpsRedirect: true
+      {{- end }}
+    {{- if .Values.istio.tls.enabled }}
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      hosts:
+        {{- range .Values.istio.hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      tls:
+        mode: {{ .Values.istio.tls.mode }}
+        credentialName: {{ .Values.istio.tls.credentialName | quote }}
+    {{- end }}
+---
+{{- end }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "k8s-dashboard.labels" . | nindent 4 }}
+spec:
+  hosts:
+    {{- range .Values.istio.hosts }}
+    - {{ . | quote }}
+    {{- end }}
+  gateways:
+    - {{ $gateway | quote }}
+  http:
+    - route:
+        - destination:
+            host: {{ $name }}
+            port:
+              number: {{ .Values.service.port }}
+{{- end }}

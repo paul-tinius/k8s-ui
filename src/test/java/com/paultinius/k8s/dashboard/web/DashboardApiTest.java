@@ -2,23 +2,31 @@ package com.paultinius.k8s.dashboard.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paultinius.k8s.dashboard.live.LiveHub;
+import jakarta.servlet.AsyncEvent;
+import jakarta.servlet.AsyncListener;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockAsyncContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 
 import java.nio.file.Path;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest
@@ -61,6 +69,9 @@ class DashboardApiTest {
 
     @Autowired
     private ObjectMapper mapper;
+
+    @Autowired
+    private LiveHub liveHub;
 
     @Test
     void index_dashboardPage_containsTheTitle() throws Exception {
@@ -138,11 +149,26 @@ class DashboardApiTest {
                 .andExpect(jsonPath("$.configured").value(false))
                 .andExpect(jsonPath("$.model").value("grok-4.7"))
                 .andExpect(jsonPath("$.baseUrlHost").value("api.x.ai"));
-        mockMvc.perform(get("/api/ai/presets"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.[?(@.id == 'xai')].compatible").value(true))
-                .andExpect(jsonPath("$.[?(@.id == 'ollama')].baseUrl").value("http://127.0.0.1:11434/v1"))
-                .andExpect(jsonPath("$.[?(@.id == 'devin')]").doesNotExist());
+    }
+
+    @Test
+    void ask_providerMissingBaseUrl_isRejected() throws Exception {
+        mockMvc.perform(post("/api/ai/ask")
+                        .contentType(MediaType.APPLICATION_JSON_VALUE)
+                        .content("""
+                                {"cluster":"demo","question":"why is it failing?","provider":"Acme","apiKey":"user-key"}
+                                """))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void ask_devinWithoutOrganization_isRejected() throws Exception {
+        mockMvc.perform(post("/api/ai/ask")
+                        .contentType(MediaType.APPLICATION_JSON_VALUE)
+                        .content("""
+                                {"cluster":"demo","question":"why is it failing?","provider":"Devin","baseUrl":"https://api.devin.ai/v3","apiKey":"cog_user_key"}
+                                """))
+                .andExpect(status().isBadRequest());
     }
 
     @Test
@@ -220,6 +246,49 @@ class DashboardApiTest {
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
         assertThat(mapper.readTree(listed).findValuesAsText("id")).doesNotContain("lab");
+    }
+
+    @Test
+    void resources_unknownCluster_returnsTheErrorJson() throws Exception {
+        mockMvc.perform(get("/api/resources").param("cluster", "missing").param("kind", "Pod"))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON_VALUE))
+                .andExpect(jsonPath("$.error").value("No cluster missing"));
+    }
+
+    @Test
+    void logsStream_unknownCluster_doesNotWriteJsonOntoTheEventStream() throws Exception {
+        mockMvc.perform(get("/api/logs/stream")
+                        .param("cluster", "missing")
+                        .accept(MediaType.TEXT_EVENT_STREAM_VALUE))
+                .andExpect(status().isNotFound())
+                .andExpect(content().string(""));
+    }
+
+    @Test
+    void live_streamError_doesNotWriteJsonOntoTheEventStream() throws Exception {
+        MvcResult result = mockMvc.perform(get("/api/live").accept(MediaType.TEXT_EVENT_STREAM_VALUE))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+        liveHub.publish("demo", "changed");
+        assertThat(result.getResponse().getContentType()).startsWith(MediaType.TEXT_EVENT_STREAM_VALUE);
+
+        if (!(result.getRequest().getAsyncContext() instanceof MockAsyncContext asyncContext)) {
+            throw new AssertionError("Expected a MockAsyncContext");
+        }
+        IllegalStateException failure = new IllegalStateException("stream failed");
+        for (AsyncListener listener : asyncContext.getListeners()) {
+            listener.onError(new AsyncEvent(
+                    asyncContext, result.getRequest(), result.getResponse(), failure));
+        }
+
+        String body = mockMvc.perform(asyncDispatch(result))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM_VALUE))
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        assertThat(body).contains("changed").doesNotContain("The request failed");
     }
 
     @Test

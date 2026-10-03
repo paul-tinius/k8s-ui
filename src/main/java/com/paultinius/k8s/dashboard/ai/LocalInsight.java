@@ -9,8 +9,14 @@ final class LocalInsight {
 
     String assess(String provider, String model, String question, ResourceDetail detail, LogPage logs) {
         StringBuilder text = new StringBuilder();
-        text.append("No API key is configured, so this is a local check. ");
-        text.append("Ask ").append(provider).append(" (").append(model).append(") by setting the server API key.\n\n");
+        if ("off".equalsIgnoreCase(provider)) {
+            text.append("Assist is off, so this is a local check. ");
+            text.append("Choose Server default or a provider to ask a model.\n\n");
+        } else {
+            text.append("No API key is configured, so this is a local check. ");
+            text.append("Enter a provider key in Assist, or set the server API key, to ask ")
+                    .append(provider).append(" (").append(model).append(").\n\n");
+        }
         if (detail == null) {
             text.append("Select a pod, deployment, or other resource, then ask again.");
         } else {

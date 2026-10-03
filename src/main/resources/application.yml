@@ -38,10 +38,10 @@ dashboard:
     data-dir: ${user.home}/.k8s-dashboard
     kubeconfigs: []
   ai:
-    provider: xAI
-    base-url: https://api.x.ai/v1
-    model: grok-4.7
-    api-key: ${XAI_API_KEY:}
+    provider: off
+    base-url: ""
+    model: ""
+    api-key: ""
     timeout: 90s
   live:
     resource-interval: 3s

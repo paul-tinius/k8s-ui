@@ -1,0 +1,6 @@
+apiVersion: v2
+name: k8s-dashboard
+description: Spring Boot dashboard for one or more Kubernetes clusters
+type: application
+version: 0.2.0
+appVersion: "1.0.0-SNAPSHOT"
