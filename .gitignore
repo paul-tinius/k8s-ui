@@ -4,4 +4,3 @@ out/
 .idea/
 *.iml
 .k8s-dashboard/
-.DS_Store
