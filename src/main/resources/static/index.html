@@ -72,6 +72,7 @@
       <span id="counts"></span>
       <span id="notice" class="notice"></span>
     </div>
+    <div class="stage" id="stage">
     <div class="body" id="workspace">
       <aside class="namespaces">
         <div class="rail-tools">
@@ -99,8 +100,8 @@
           <button type="button" data-tab="events">Events</button>
           <button type="button" data-tab="logs">Logs</button>
           <button type="button" data-tab="forwards">Port forward</button>
-          <button type="button" data-tab="assist">Assist</button>
           <button type="button" data-tab="management">Management</button>
+          <button type="button" data-tab="assist">Assist</button>
         </nav>
         <section id="view"></section>
       </main>
@@ -117,6 +118,36 @@
       </aside>
       <div id="split-namespaces" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize namespaces" tabindex="0"></div>
       <div id="split-detail" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize manifest" tabindex="0"></div>
+    </div>
+    <div id="split-terminal" class="splitter splitter-row" role="separator" aria-orientation="horizontal" aria-label="Resize commands" tabindex="0"></div>
+    <section id="terminal" class="terminal" aria-label="Commands">
+      <div class="terminal-bar">
+        <button type="button" id="terminal-collapse" aria-expanded="true" aria-controls="terminal-body" aria-label="Hide commands">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          <span>Commands</span>
+        </button>
+        <span id="terminal-context" class="terminal-context"></span>
+      </div>
+      <div id="terminal-body">
+        <div id="terminal-output" tabindex="0">
+          <p class="term-intro">kubectl and helm run on the selected cluster. Tab completes a command. Enter runs it. Pick one namespace to add -n. Stop ends a running command.</p>
+        </div>
+        <div class="term-compose">
+          <ul id="terminal-suggestions" class="term-suggest" role="listbox" hidden></ul>
+          <form id="terminal-form" class="term-form" autocomplete="off">
+            <span class="prompt" aria-hidden="true">$</span>
+            <div class="term-input-wrap">
+              <div id="terminal-ghost" class="term-ghost" aria-hidden="true"></div>
+              <input id="terminal-input" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" role="combobox" aria-autocomplete="list" aria-controls="terminal-suggestions" aria-expanded="false" aria-label="kubectl or helm command" placeholder="kubectl get pods">
+            </div>
+            <button type="submit" id="terminal-run" class="primary">Run</button>
+            <button type="button" id="terminal-stop" hidden>Stop</button>
+          </form>
+          <p id="terminal-hint" class="term-hint">Run kubectl or helm on the selected cluster. Tab completes. Enter runs.</p>
+          <p id="terminal-usage" class="term-usage"></p>
+        </div>
+      </div>
+    </section>
     </div>
   </div>
   <div id="modal" class="modal hidden"></div>

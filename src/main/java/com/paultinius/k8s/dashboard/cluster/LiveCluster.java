@@ -48,6 +48,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -119,6 +120,16 @@ final class LiveCluster implements ClusterClient {
     @Override
     public ClusterInfo info() {
         return new ClusterInfo(id, name, server, namespace, false, false, source);
+    }
+
+    @Override
+    public Optional<String> kubeconfigDocument() {
+        return kubeconfig == null || kubeconfig.isBlank() ? Optional.empty() : Optional.of(kubeconfig);
+    }
+
+    @Override
+    public boolean inCluster() {
+        return inCluster;
     }
 
     @Override

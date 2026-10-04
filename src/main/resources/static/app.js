@@ -31,7 +31,26 @@ const state = {
   }, loadAiSettings()),
   notice: "",
   source: null,
-  timer: 0
+  timer: 0,
+  terminal: {
+    history: [],
+    cursor: 0,
+    draft: "",
+    run: 0,
+    runComplete: 0,
+    commandId: "",
+    completeAbort: null,
+    active: 0,
+    suggestions: [],
+    replaceFrom: 0,
+    replaceTo: 0,
+    line: "",
+    hint: "Run kubectl or helm on the selected cluster. Tab completes. Enter runs.",
+    usage: "",
+    timer: 0,
+    abort: null,
+    busy: false
+  }
 };
 
 const MANAGE_KINDS = [
@@ -129,6 +148,119 @@ function esc(value) {
   }[char]));
 }
 
+const COPY_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1"/></svg>`;
+const copyIcons = new WeakMap();
+const copyTimers = new WeakMap();
+
+function copyButton(label, mode, id, enabled) {
+  const ident = id ? ` id="${id}"` : "";
+  const disabled = enabled === false ? " disabled" : "";
+  return `<button type="button" class="copy-icon" data-copy="${mode}" aria-label="${esc(label)}" title="Copy"${ident}${disabled}>${COPY_ICON}</button>`;
+}
+
+function configMapCopyButton(resource) {
+  return `<button type="button" class="copy-icon" data-copy="configmap" data-namespace="${esc(resource.namespace)}" data-name="${esc(resource.name)}" aria-label="Copy ${esc(resource.name)}" title="Copy">${COPY_ICON}</button>`;
+}
+
+function configDataText(yaml) {
+  const lines = String(yaml || "").replace(/\r\n/g, "\n").split("\n");
+  const start = lines.findIndex((line) => line === "data:" || line === "binaryData:");
+  if (start < 0) return "";
+  const kept = [];
+  for (let index = start; index < lines.length; index++) {
+    if (index > start && lines[index] && !/^\s/.test(lines[index])) break;
+    kept.push(lines[index]);
+  }
+  return kept.join("\n").trim();
+}
+
+async function textForCopy(button) {
+  const mode = button.dataset.copy;
+  if (mode === "assist") {
+    if (!state.ai.answer || state.ai.busy) return null;
+    return state.ai.answer;
+  }
+  if (mode === "logs") {
+    const output = document.getElementById("log-output");
+    if (!output || output.dataset.empty === "true") return null;
+    return output.textContent;
+  }
+  if (mode === "terminal") {
+    const output = document.getElementById("terminal-output");
+    if (!output || !output.querySelector(".term-entry")) return null;
+    return output.innerText.trim();
+  }
+  if (mode === "yaml" || mode === "edit-yaml") {
+    if (mode === "edit-yaml") {
+      const box = document.getElementById("manage-yaml");
+      return box && box.value.trim() ? box.value : null;
+    }
+    const yaml = document.getElementById("yaml");
+    return yaml && yaml.textContent.trim() ? yaml.textContent : null;
+  }
+  if (mode === "configmap") {
+    const name = button.dataset.name || "";
+    const namespace = button.dataset.namespace || "";
+    if (!name) return null;
+    let yaml = "";
+    const open = state.detail && state.detail.resource;
+    if (open && open.kind === "ConfigMap" && open.name === name && (open.namespace || "") === namespace) {
+      yaml = state.detail.yaml || "";
+    } else {
+      const detail = await api("/api/resources/ConfigMap/" + encodeURIComponent(namespace || "_") + "/" + encodeURIComponent(name) + "?" + clusterQuery());
+      yaml = detail.yaml || "";
+    }
+    return configDataText(yaml) || yaml || null;
+  }
+  return null;
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.left = "-9999px";
+  document.body.append(area);
+  area.select();
+  const ok = document.execCommand("copy");
+  area.remove();
+  if (!ok) throw new Error("copy failed");
+}
+
+function showCopied(button) {
+  if (!copyIcons.has(button)) copyIcons.set(button, button.innerHTML);
+  if (!button.dataset.copyLabel) button.dataset.copyLabel = button.getAttribute("aria-label") || "Copy";
+  button.dataset.copied = "true";
+  button.textContent = "Copied!";
+  button.setAttribute("aria-label", "Copied!");
+  const existing = copyTimers.get(button);
+  if (existing) window.clearTimeout(existing);
+  copyTimers.set(button, window.setTimeout(() => {
+    copyTimers.delete(button);
+    if (!button.isConnected || button.dataset.copied !== "true") return;
+    button.innerHTML = copyIcons.get(button);
+    button.setAttribute("aria-label", button.dataset.copyLabel);
+    delete button.dataset.copied;
+    syncCopyButtons();
+  }, 1200));
+}
+
+async function copyFromButton(button) {
+  const text = await textForCopy(button);
+  if (text == null) return;
+  try {
+    await writeClipboard(text);
+    showCopied(button);
+  } catch (error) {
+    notice("Select the text and copy it");
+  }
+}
+
 function age(created) {
   if (!created) return "";
   const then = Date.parse(created);
@@ -160,7 +292,12 @@ async function api(path, options = {}) {
   const headers = { Accept: "application/json" };
   if (options.body) headers["Content-Type"] = "application/json";
   if (state.token) headers.Authorization = "Bearer " + state.token;
-  const response = await fetch(path, { method: options.method || "GET", headers, body: options.body });
+  const response = await fetch(path, {
+    method: options.method || "GET",
+    headers,
+    body: options.body,
+    signal: options.signal
+  });
   if (response.status === 401) {
     const error = new Error("unauthorized");
     error.status = 401;
@@ -205,6 +342,7 @@ async function loadClusters() {
   const active = state.clusters.find((cluster) => cluster.active) || state.clusters[0];
   state.clusterId = state.clusters.some((cluster) => cluster.id === previous) ? previous : (active ? active.id : "");
   select.value = state.clusterId;
+  paintTerminalContext();
 }
 
 async function loadNamespaces(selectAll) {
@@ -234,24 +372,27 @@ async function loadNamespaces(selectAll) {
 function paintNamespaces() {
   const host = document.getElementById("namespace-list");
   host.innerHTML = state.namespaces.map((name) => `
-    <label class="ns">
-      <input type="checkbox" value="${esc(name)}" ${state.selectedNamespaces.has(name) ? "checked" : ""}>
-      ${esc(name)}
-    </label>
+    <div class="ns">
+      <input type="checkbox" value="${esc(name)}" aria-label="${esc(name)}" ${state.selectedNamespaces.has(name) ? "checked" : ""}>
+      <span class="ns-name">${esc(name)}</span>
+    </div>
   `).join("") || `<p class="muted">No namespaces</p>`;
   host.querySelectorAll("input").forEach((input) => {
     input.addEventListener("change", () => {
       if (input.checked) state.selectedNamespaces.add(input.value);
       else state.selectedNamespaces.delete(input.value);
+      paintTerminalContext();
       refresh();
     });
   });
+  paintTerminalContext();
 }
 
 function paintShell() {
   const view = document.getElementById("view");
   if (state.tab === "logs") {
     view.innerHTML = `
+      <div class="tab-tools">${copyButton("Copy logs", "logs", "", false)}</div>
       <div class="inline">
         <label>Deployment <input id="log-deployment" value="${esc(state.logs.deployment)}" placeholder="storefront"></label>
         <label>Pod <input id="log-pod" value="${esc(state.logs.pod)}" placeholder="optional"></label>
@@ -281,7 +422,7 @@ function paintShell() {
   } else if (state.tab === "assist") {
     view.innerHTML = `
       <div class="panel assist">
-        <h2>Assist</h2>
+        <div class="panel-head"><h2>Assist</h2>${copyButton("Copy answer", "assist", "ai-copy")}</div>
         <p id="ai-status" class="muted"></p>
         <label>Provider name <input id="ai-provider" autocomplete="off" maxlength="80" placeholder="Grok" value="${esc(state.ai.providerName)}"></label>
         <label>Base URL <input id="ai-base-url" autocomplete="off" maxlength="500" placeholder="https://api.x.ai/v1" value="${esc(state.ai.baseUrl)}"></label>
@@ -303,7 +444,6 @@ function paintShell() {
         <label class="inline"><input id="ai-logs" type="checkbox" ${state.ai.includeLogs ? "checked" : ""}> Include recent logs</label>
         <div class="actions">
           <button class="primary" id="ai-ask" type="button">Ask</button>
-          <button type="button" id="ai-copy">Copy answer</button>
         </div>
         <textarea id="ai-answer" class="answer" readonly aria-label="Assist answer"></textarea>
       </div>`;
@@ -314,7 +454,6 @@ function paintShell() {
     document.getElementById("ai-key-toggle").addEventListener("click", toggleApiKey);
     document.getElementById("ai-org").addEventListener("input", saveAiChoice);
     document.getElementById("ai-ask").addEventListener("click", ask);
-    document.getElementById("ai-copy").addEventListener("click", copyAnswer);
     toggleAiFields();
   } else if (state.tab === "management") {
     view.innerHTML = `
@@ -329,7 +468,7 @@ function paintShell() {
           </label>
           <div id="manage-resources"></div>
           <form id="manage-edit" class="${state.management.editing ? "" : "hidden"}">
-            <h3 id="manage-edit-title"></h3>
+            <div class="panel-head"><h3 id="manage-edit-title"></h3>${copyButton("Copy manifest", "edit-yaml", "", false)}</div>
             <textarea id="manage-yaml">${esc(state.management.yaml)}</textarea>
             <div class="actions"><button class="primary" type="submit">Save</button><button type="button" id="manage-edit-cancel">Cancel</button></div>
           </form>
@@ -362,6 +501,7 @@ function paintShell() {
     });
     document.getElementById("manage-yaml").addEventListener("input", (event) => {
       state.management.yaml = event.target.value;
+      syncCopyButtons();
     });
     document.getElementById("manage-edit").addEventListener("submit", saveManagedResource);
     document.getElementById("manage-edit-cancel").addEventListener("click", closeManagedEdit);
@@ -390,6 +530,7 @@ function paintShell() {
   document.querySelectorAll("#tabs button").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === state.tab);
   });
+  syncCopyButtons();
 }
 
 function captureLogs() {
@@ -472,7 +613,10 @@ async function paintResources() {
   });
   document.getElementById("grid-body").innerHTML = html || `<tr><td>No resources match.</td></tr>`;
   document.querySelectorAll("#grid-body tr.clickable").forEach((row) => {
-    row.addEventListener("click", () => openDetail(row.dataset.kind, row.dataset.namespace, row.dataset.name));
+    row.addEventListener("click", (event) => {
+      if (event.target.closest(".copy-icon")) return;
+      openDetail(row.dataset.kind, row.dataset.namespace, row.dataset.name);
+    });
   });
   document.getElementById("counts").textContent = state.resources.length + " " + state.tab + " in " + state.selectedNamespaces.size + " namespaces";
 }
@@ -490,7 +634,10 @@ function columnsFor(tab) {
   if (tab === "pods") return [name, namespace, status, ready, node, images, created];
   if (tab === "deployments") return [name, namespace, status, ready, images, created];
   if (tab === "services") return [name, namespace, attr("Type", "type"), attr("Cluster IP", "clusterIP"), attr("Ports", "ports")];
-  if (tab === "configmaps") return [name, namespace, attr("Keys", "keys"), created];
+  if (tab === "configmaps") {
+    const configName = { label: "Name", cell: (resource) => `<span class="copy-line">${esc(resource.name)} ${configMapCopyButton(resource)}</span>` };
+    return [configName, namespace, attr("Keys", "keys"), created];
+  }
   if (tab === "nodes") return [name, status, attr("Roles", "roles"), attr("CPU", "cpu"), attr("Memory", "memory")];
   return [namespace, name, status, attr("Reason", "reason"), summary];
 }
@@ -505,10 +652,12 @@ async function paintLogs() {
   const page = await api(path);
   const output = document.getElementById("log-output");
   if (!output) return;
+  output.dataset.empty = page.lines.length ? "false" : "true";
   output.textContent = page.lines.length
     ? page.lines.map((line) => line.namespace + "/" + line.pod + "/" + line.container + "  " + line.text).join("\n")
     : "No log lines match.";
   document.getElementById("counts").textContent = page.lines.length + (page.truncated ? " lines, truncated" : " lines");
+  syncCopyButtons();
 }
 
 async function paintForwards() {
@@ -634,33 +783,7 @@ function showAnswer() {
   answer.style.height = Math.max(answer.scrollHeight, 144) + "px";
 }
 
-async function copyAnswer() {
-  const text = state.ai.answer;
-  if (!text || state.ai.busy) return;
-  const box = document.getElementById("ai-answer");
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      if (!box) return;
-      box.focus();
-      box.select();
-      document.execCommand("copy");
-    }
-    const button = document.getElementById("ai-copy");
-    if (!button) return;
-    button.textContent = "Copied";
-    window.setTimeout(() => {
-      if (button.textContent === "Copied") button.textContent = "Copy answer";
-    }, 1200);
-  } catch (error) {
-    if (box) {
-      box.focus();
-      box.select();
-    }
-    notice("Select the answer and copy it");
-  }
-}
+
 
 async function ask() {
   saveAiChoice();
@@ -722,7 +845,9 @@ function paintDetail() {
   const host = document.getElementById("detail-body");
   if (!host) return;
   if (!detail) {
-    host.innerHTML = `<p class="muted">Select a resource to see its manifest and actions.</p>`;
+    host.innerHTML = `
+      <div class="detail-head"><h2>Manifest</h2></div>
+      <p class="muted">Select a resource to see its manifest and actions.</p>`;
     return;
   }
   const resource = detail.resource;
@@ -740,7 +865,7 @@ function paintDetail() {
   actions += `<button type="button" id="use-logs">Logs</button>`;
   actions += `<button type="button" id="use-assist">Ask about this</button>`;
   host.innerHTML = `
-    <div class="detail-head"><h2>${esc(resource.kind)}</h2>${chip(resource.status)}</div>
+    <div class="detail-head"><h2>${esc(resource.kind)}</h2><div class="detail-tools">${chip(resource.status)}${String(detail.yaml || "").trim() ? copyButton("Copy manifest", "yaml") : ""}</div></div>
     <p>${esc(where)}</p>
     <p class="muted">${esc(resource.summary)}</p>
     <div class="actions">${actions}</div>
@@ -863,6 +988,7 @@ function closeManagedEdit() {
   const box = document.getElementById("manage-yaml");
   if (form) form.classList.add("hidden");
   if (box) box.value = "";
+  syncCopyButtons();
 }
 
 function closeManagedEditOutside(clusterId) {
@@ -882,6 +1008,7 @@ async function editManagedResource(kind, namespace, name) {
     if (form) form.classList.remove("hidden");
     if (box) box.value = state.management.yaml;
     setManagedEditTitle(state.management.editing);
+    syncCopyButtons();
   } catch (error) {
     notice(error.message);
   }
@@ -1187,15 +1314,10 @@ function setPanelCollapsed(side, collapsed, persist) {
   const spec = PANEL_COLLAPSE[side];
   const workspace = document.getElementById("workspace");
   const button = document.getElementById(spec.button);
-  const splitter = document.getElementById(spec.splitter);
   if (workspace) workspace.classList.toggle(spec.className, collapsed);
   if (button) {
     button.setAttribute("aria-expanded", collapsed ? "false" : "true");
     button.setAttribute("aria-label", collapsed ? spec.show : spec.hide);
-  }
-  if (splitter) {
-    splitter.hidden = collapsed && !stackedLayout();
-    splitter.tabIndex = collapsed ? -1 : 0;
   }
   if (persist) {
     try {
@@ -1204,42 +1326,47 @@ function setPanelCollapsed(side, collapsed, persist) {
       /* Private browsing can reject sessionStorage. The panel still toggles. */
     }
   }
-  if (workspace && !stackedLayout()) {
-    const other = side === "namespaces" ? "detail" : "namespaces";
-    applyPanelWidth(workspace, other, panels[other]);
-  }
+  layoutPanels();
 }
 
 const PANEL_LIMITS = {
-  namespaces: { min: 160, max: 520, fallback: 230, key: "k8s-dashboard-namespaces-width" },
-  detail: { min: 240, max: 760, fallback: 360, key: "k8s-dashboard-detail-width" }
+  namespaces: { min: 160, max: 520, fallback: 0.18, key: "k8s-dashboard-namespaces-width", ratioKey: "k8s-dashboard-namespaces-ratio" },
+  detail: { min: 240, max: 760, fallback: 0.28, key: "k8s-dashboard-detail-width", ratioKey: "k8s-dashboard-detail-ratio" }
 };
 const MAIN_MIN = 280;
-const panels = {
-  namespaces: PANEL_LIMITS.namespaces.fallback,
-  detail: PANEL_LIMITS.detail.fallback
-};
+const panelRatios = { namespaces: null, detail: null };
 
 function installSplitters() {
   const workspace = document.getElementById("workspace");
   if (!workspace) return;
-  restorePanelWidths(workspace);
-  setPanelCollapsed("namespaces", sessionStorage.getItem(PANEL_COLLAPSE.namespaces.key) === "1", false);
-  setPanelCollapsed("detail", sessionStorage.getItem(PANEL_COLLAPSE.detail.key) === "1", false);
+  setPanelCollapsed("namespaces", storageGet(sessionStorage, PANEL_COLLAPSE.namespaces.key) === "1", false);
+  setPanelCollapsed("detail", storageGet(sessionStorage, PANEL_COLLAPSE.detail.key) === "1", false);
   bindSplitter(document.getElementById("split-namespaces"), "namespaces");
   bindSplitter(document.getElementById("split-detail"), "detail");
-  window.addEventListener("resize", () => {
-    if (stackedLayout()) return;
-    applyPanelWidth(workspace, "namespaces", panels.namespaces);
-    applyPanelWidth(workspace, "detail", panels.detail);
-    rememberPanelWidths();
+  if (window.ResizeObserver) {
+    const observer = new ResizeObserver(() => scheduleLayout());
+    observer.observe(workspace);
+    const stage = document.getElementById("stage");
+    if (stage) observer.observe(stage);
+  }
+  window.addEventListener("resize", scheduleLayout);
+  scheduleLayout();
+}
+
+let layoutFrame = 0;
+function scheduleLayout() {
+  if (layoutFrame) return;
+  layoutFrame = window.requestAnimationFrame(() => {
+    layoutFrame = 0;
+    layoutPanels();
+    layoutTerminal();
   });
 }
 
 function bindSplitter(splitter, side) {
   if (!splitter) return;
   splitter.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || stackedLayout()) return;
+    if (event.button !== 0 || stackedLayout() || panelCollapsed(side)) return;
     event.preventDefault();
     const workspace = document.getElementById("workspace");
     splitter.classList.add("dragging");
@@ -1252,79 +1379,692 @@ function bindSplitter(splitter, side) {
       splitter.removeEventListener("pointermove", onMove);
       splitter.removeEventListener("pointerup", onUp);
       splitter.removeEventListener("pointercancel", onUp);
-      rememberPanelWidths();
+      rememberPanelRatios();
     };
     splitter.addEventListener("pointermove", onMove);
     splitter.addEventListener("pointerup", onUp);
     splitter.addEventListener("pointercancel", onUp);
   });
   splitter.addEventListener("keydown", (event) => {
-    if (stackedLayout()) return;
+    if (stackedLayout() || panelCollapsed(side)) return;
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     const step = event.shiftKey ? 48 : 16;
     const delta = event.key === "ArrowLeft" ? -step : step;
-    const current = panels[side];
-    const next = side === "namespaces" ? current + delta : current - delta;
-    applyPanelWidth(document.getElementById("workspace"), side, next);
-    rememberPanelWidths();
+    nudgePanel(side, delta);
   });
   splitter.addEventListener("dblclick", () => {
-    applyPanelWidth(document.getElementById("workspace"), side, PANEL_LIMITS[side].fallback);
-    rememberPanelWidths();
+    panelRatios[side] = PANEL_LIMITS[side].fallback;
+    layoutPanels();
+    rememberPanelRatios();
   });
 }
 
 function resizePanel(workspace, side, clientX) {
   const rect = workspace.getBoundingClientRect();
   const width = side === "namespaces" ? clientX - rect.left : rect.right - clientX;
-  applyPanelWidth(workspace, side, width);
+  const total = rect.width || 1;
+  panelRatios[side] = width / total;
+  layoutPanels();
 }
 
-function applyPanelWidth(workspace, side, width) {
-  panels[side] = clampPanel(workspace, side, width);
+/* Preferred shares of the workspace stay fixed. Applied widths are whatever fits this window. */
+function layoutPanels() {
+  const workspace = document.getElementById("workspace");
+  if (!workspace) return;
+  syncPanelSplitter("namespaces");
+  syncPanelSplitter("detail");
+  if (stackedLayout()) return;
+  const total = Math.round(workspace.getBoundingClientRect().width);
+  if (total < 48) return;
+  ensurePanelRatios(total);
+
+  const open = {
+    namespaces: !panelCollapsed("namespaces"),
+    detail: !panelCollapsed("detail")
+  };
+  const widths = {
+    namespaces: open.namespaces ? desiredPanelWidth(total, "namespaces") : PANEL_RAIL,
+    detail: open.detail ? desiredPanelWidth(total, "detail") : PANEL_RAIL
+  };
+  const mainFloor = Math.min(MAIN_MIN, Math.max(96, Math.round(total * 0.34)));
+  const overflow = widths.namespaces + widths.detail + mainFloor - total;
+  if (overflow > 0) shrinkPanelsToFit(widths, open, total, overflow);
+
+  const hardMain = 64;
+  if (widths.namespaces + widths.detail > total - hardMain) {
+    const budget = Math.max(hardMain, total - hardMain);
+    const scale = budget / (widths.namespaces + widths.detail);
+    widths.namespaces = Math.max(open.namespaces ? 56 : PANEL_RAIL, Math.floor(widths.namespaces * scale));
+    widths.detail = Math.max(open.detail ? 56 : PANEL_RAIL, Math.floor(widths.detail * scale));
+    if (widths.namespaces + widths.detail > total - hardMain) {
+      widths.detail = Math.max(open.detail ? 56 : PANEL_RAIL, total - hardMain - widths.namespaces);
+    }
+  }
+
+  paintPanelWidth(workspace, "namespaces", widths.namespaces);
+  paintPanelWidth(workspace, "detail", widths.detail);
+}
+
+function shrinkPanelsToFit(widths, open, total, overflow) {
+  const floors = {
+    namespaces: open.namespaces ? Math.min(PANEL_LIMITS.namespaces.min, Math.max(72, Math.round(total * 0.14))) : PANEL_RAIL,
+    detail: open.detail ? Math.min(PANEL_LIMITS.detail.min, Math.max(96, Math.round(total * 0.18))) : PANEL_RAIL
+  };
+  const nsSlack = open.namespaces ? Math.max(0, widths.namespaces - floors.namespaces) : 0;
+  const detailSlack = open.detail ? Math.max(0, widths.detail - floors.detail) : 0;
+  const slack = nsSlack + detailSlack;
+  if (slack <= 0) {
+    widths.namespaces = floors.namespaces;
+    widths.detail = floors.detail;
+    return;
+  }
+  const cut = Math.min(overflow, slack);
+  const nsCut = nsSlack ? Math.round(cut * (nsSlack / slack)) : 0;
+  widths.namespaces -= nsCut;
+  widths.detail -= cut - nsCut;
+}
+
+function desiredPanelWidth(total, side) {
+  const limit = PANEL_LIMITS[side];
+  const raw = Math.round(total * panelRatios[side]);
+  return Math.min(limit.max, Math.max(limit.min, raw));
+}
+
+function ensurePanelRatios(total) {
+  ["namespaces", "detail"].forEach((side) => {
+    if (panelRatios[side] != null) return;
+    panelRatios[side] = storedPanelRatio(side, total);
+  });
+}
+
+function storedPanelRatio(side, total) {
+  const limit = PANEL_LIMITS[side];
+  const savedRatio = Number(storageGet(sessionStorage, limit.ratioKey));
+  if (savedRatio > 0.04 && savedRatio < 0.8) return savedRatio;
+  const savedPx = Number(storageGet(sessionStorage, limit.key));
+  if (Number.isFinite(savedPx) && savedPx > 0 && total > 0) return savedPx / total;
+  return limit.fallback;
+}
+
+function paintPanelWidth(workspace, side, width) {
   const property = side === "namespaces" ? "--namespaces-width" : "--detail-width";
-  workspace.style.setProperty(property, panels[side] + "px");
+  const rounded = Math.round(width);
+  workspace.style.setProperty(property, rounded + "px");
   const splitter = document.getElementById(side === "namespaces" ? "split-namespaces" : "split-detail");
   if (!splitter) return;
-  splitter.setAttribute("aria-valuemin", String(PANEL_LIMITS[side].min));
-  splitter.setAttribute("aria-valuemax", String(PANEL_LIMITS[side].max));
-  splitter.setAttribute("aria-valuenow", String(panels[side]));
-}
-
-function clampPanel(workspace, side, width) {
   const limit = PANEL_LIMITS[side];
-  const rounded = Math.round(Number(width));
-  if (!Number.isFinite(rounded)) return limit.fallback;
-  let max = limit.max;
-  const rect = workspace.getBoundingClientRect();
-  if (rect.width > 0) {
-    const other = side === "namespaces"
-      ? (panelCollapsed("detail") ? PANEL_RAIL : panels.detail)
-      : (panelCollapsed("namespaces") ? PANEL_RAIL : panels.namespaces);
-    max = Math.min(max, Math.max(limit.min, rect.width - other - MAIN_MIN));
-  }
-  return Math.min(Math.max(rounded, limit.min), max);
+  splitter.setAttribute("aria-valuemin", String(limit.min));
+  splitter.setAttribute("aria-valuemax", String(limit.max));
+  splitter.setAttribute("aria-valuenow", String(rounded));
 }
 
-function restorePanelWidths(workspace) {
-  applyPanelWidth(workspace, "namespaces", storedPanelWidth("namespaces"));
-  applyPanelWidth(workspace, "detail", storedPanelWidth("detail"));
+function appliedPanelWidth(side) {
+  const workspace = document.getElementById("workspace");
+  const property = side === "namespaces" ? "--namespaces-width" : "--detail-width";
+  const value = workspace ? parseFloat(workspace.style.getPropertyValue(property)) : NaN;
+  return Number.isFinite(value) ? value : PANEL_LIMITS[side].min;
 }
 
-function storedPanelWidth(side) {
-  const saved = Number(sessionStorage.getItem(PANEL_LIMITS[side].key));
-  return Number.isFinite(saved) && saved > 0 ? saved : PANEL_LIMITS[side].fallback;
+function rememberPanelRatios() {
+  const workspace = document.getElementById("workspace");
+  const total = workspace ? workspace.getBoundingClientRect().width : 0;
+  if (total <= 0) return;
+  ["namespaces", "detail"].forEach((side) => {
+    if (panelCollapsed(side)) return;
+    panelRatios[side] = appliedPanelWidth(side) / total;
+    storageSet(sessionStorage, PANEL_LIMITS[side].ratioKey, String(Math.round(panelRatios[side] * 1000) / 1000));
+  });
 }
 
-function rememberPanelWidths() {
-  sessionStorage.setItem(PANEL_LIMITS.namespaces.key, String(panels.namespaces));
-  sessionStorage.setItem(PANEL_LIMITS.detail.key, String(panels.detail));
+function nudgePanel(side, delta) {
+  const workspace = document.getElementById("workspace");
+  if (!workspace) return;
+  const total = workspace.getBoundingClientRect().width || 1;
+  const current = appliedPanelWidth(side);
+  const next = side === "namespaces" ? current + delta : current - delta;
+  panelRatios[side] = next / total;
+  layoutPanels();
+  rememberPanelRatios();
+}
+
+function syncPanelSplitter(side) {
+  const splitter = document.getElementById(PANEL_COLLAPSE[side].splitter);
+  if (!splitter) return;
+  const collapsed = panelCollapsed(side) || stackedLayout();
+  splitter.hidden = collapsed;
+  splitter.tabIndex = collapsed ? -1 : 0;
 }
 
 function stackedLayout() {
   return window.matchMedia("(max-width: 980px)").matches;
 }
+
+const TERMINAL_COLLAPSED = "k8s-dashboard-terminal-collapsed";
+const TERMINAL_HEIGHT = "k8s-dashboard-terminal-height";
+const TERMINAL_RATIO_KEY = "k8s-dashboard-terminal-ratio";
+const TERMINAL_HISTORY = "k8s-dashboard-terminal-history";
+const TERMINAL_MIN = 180;
+const TERMINAL_MAIN_MIN = 180;
+let terminalHeight = 320;
+let terminalRatio = null;
+
+function commandNamespace() {
+  return state.selectedNamespaces.size === 1 ? [...state.selectedNamespaces][0] : "";
+}
+
+function paintTerminalContext() {
+  const context = document.getElementById("terminal-context");
+  if (!context) return;
+  const cluster = state.clusters.find((item) => item.id === state.clusterId);
+  const name = cluster ? cluster.name : "No cluster";
+  const namespace = commandNamespace();
+  if (namespace) {
+    context.textContent = name + " · -n " + namespace;
+    return;
+  }
+  if (state.namespaces.length > 0 && state.selectedNamespaces.size === state.namespaces.length) {
+    context.textContent = name + " · all namespaces";
+    return;
+  }
+  context.textContent = name + " · pick one namespace to add -n";
+}
+
+function terminalCollapsed() {
+  const stage = document.getElementById("stage");
+  return Boolean(stage && stage.classList.contains("terminal-collapsed"));
+}
+
+function setTerminalCollapsed(collapsed, persist) {
+  const stage = document.getElementById("stage");
+  const button = document.getElementById("terminal-collapse");
+  const splitter = document.getElementById("split-terminal");
+  if (stage) stage.classList.toggle("terminal-collapsed", collapsed);
+  if (button) {
+    button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    button.setAttribute("aria-label", collapsed ? "Show commands" : "Hide commands");
+  }
+  if (splitter) {
+    splitter.hidden = collapsed || stackedLayout();
+    splitter.tabIndex = collapsed ? -1 : 0;
+  }
+  if (persist) storageSet(sessionStorage, TERMINAL_COLLAPSED, collapsed ? "1" : "0");
+  if (!collapsed && persist) {
+    const input = document.getElementById("terminal-input");
+    if (input) input.focus();
+  }
+  layoutTerminal();
+}
+
+function layoutTerminal() {
+  const stage = document.getElementById("stage");
+  const splitter = document.getElementById("split-terminal");
+  const collapsed = terminalCollapsed() || stackedLayout();
+  if (splitter) {
+    splitter.hidden = collapsed;
+    splitter.tabIndex = collapsed ? -1 : 0;
+  }
+  if (!stage || collapsed) return;
+  const total = Math.round(stage.getBoundingClientRect().height);
+  if (total < 48) return;
+  ensureTerminalRatio(total);
+  const bounds = terminalBounds(total);
+  let height = Math.round(total * terminalRatio);
+  height = Math.min(Math.max(height, bounds.min), bounds.max);
+  if (height > total - 56) height = Math.max(56, total - 56);
+  paintTerminalHeight(stage, height, bounds);
+}
+
+function terminalBounds(total) {
+  const min = Math.min(TERMINAL_MIN, Math.max(88, Math.round(total * 0.2)));
+  const main = Math.min(TERMINAL_MAIN_MIN, Math.max(96, Math.round(total * 0.28)));
+  return { min, max: Math.max(min, total - main) };
+}
+
+function ensureTerminalRatio(total) {
+  if (terminalRatio != null) return;
+  const savedRatio = Number(storageGet(sessionStorage, TERMINAL_RATIO_KEY));
+  if (savedRatio > 0.08 && savedRatio < 0.92) {
+    terminalRatio = savedRatio;
+    return;
+  }
+  const savedPx = Number(storageGet(sessionStorage, TERMINAL_HEIGHT));
+  if (Number.isFinite(savedPx) && savedPx > 0 && total > 0) {
+    terminalRatio = savedPx / total;
+    return;
+  }
+  terminalRatio = 0.5;
+}
+
+function paintTerminalHeight(stage, height, bounds) {
+  terminalHeight = Math.round(height);
+  stage.style.setProperty("--terminal-height", terminalHeight + "px");
+  const splitter = document.getElementById("split-terminal");
+  if (!splitter) return;
+  splitter.setAttribute("aria-valuemin", String(bounds.min));
+  splitter.setAttribute("aria-valuemax", String(bounds.max));
+  splitter.setAttribute("aria-valuenow", String(terminalHeight));
+}
+
+function rememberTerminalRatio() {
+  const stage = document.getElementById("stage");
+  const total = stage ? stage.getBoundingClientRect().height : 0;
+  if (total <= 0) return;
+  terminalRatio = terminalHeight / total;
+  storageSet(sessionStorage, TERMINAL_RATIO_KEY, String(Math.round(terminalRatio * 1000) / 1000));
+}
+
+function installTerminal() {
+  const stage = document.getElementById("stage");
+  if (!stage) return;
+  setTerminalCollapsed(storageGet(sessionStorage, TERMINAL_COLLAPSED) === "1", false);
+  try {
+    const saved = JSON.parse(storageGet(sessionStorage, TERMINAL_HISTORY) || "[]");
+    state.terminal.history = Array.isArray(saved) ? saved.filter((item) => typeof item === "string") : [];
+  } catch (error) {
+    state.terminal.history = [];
+  }
+  state.terminal.cursor = state.terminal.history.length;
+  bindTerminalSplitter();
+  bindTerminalInput();
+  paintTerminalContext();
+  layoutTerminal();
+}
+
+function bindTerminalSplitter() {
+  const splitter = document.getElementById("split-terminal");
+  if (!splitter) return;
+  splitter.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || stackedLayout() || terminalCollapsed()) return;
+    event.preventDefault();
+    splitter.classList.add("dragging");
+    document.body.classList.add("resizing-row");
+    if (splitter.setPointerCapture) splitter.setPointerCapture(event.pointerId);
+    const onMove = (move) => {
+      const rect = document.getElementById("stage").getBoundingClientRect();
+      const total = rect.height || 1;
+      terminalRatio = (rect.bottom - move.clientY) / total;
+      layoutTerminal();
+    };
+    const onUp = () => {
+      splitter.classList.remove("dragging");
+      document.body.classList.remove("resizing-row");
+      splitter.removeEventListener("pointermove", onMove);
+      splitter.removeEventListener("pointerup", onUp);
+      splitter.removeEventListener("pointercancel", onUp);
+      rememberTerminalRatio();
+    };
+    splitter.addEventListener("pointermove", onMove);
+    splitter.addEventListener("pointerup", onUp);
+    splitter.addEventListener("pointercancel", onUp);
+  });
+  splitter.addEventListener("keydown", (event) => {
+    if (stackedLayout() || terminalCollapsed()) return;
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const stage = document.getElementById("stage");
+    const total = stage ? stage.getBoundingClientRect().height : 1;
+    const step = event.shiftKey ? 48 : 16;
+    const delta = event.key === "ArrowUp" ? step : -step;
+    terminalRatio = (terminalHeight + delta) / (total || 1);
+    layoutTerminal();
+    rememberTerminalRatio();
+  });
+  splitter.addEventListener("dblclick", () => {
+    terminalRatio = 0.5;
+    layoutTerminal();
+    rememberTerminalRatio();
+  });
+}
+
+function bindTerminalInput() {
+  const form = document.getElementById("terminal-form");
+  const input = document.getElementById("terminal-input");
+  const stop = document.getElementById("terminal-stop");
+  if (!form || !input) return;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runCommand(input.value);
+  });
+  input.addEventListener("input", () => {
+    state.terminal.cursor = state.terminal.history.length;
+    hideSuggestions();
+    scheduleComplete();
+  });
+  input.addEventListener("focus", scheduleComplete);
+  input.addEventListener("keydown", onTerminalKey);
+  input.addEventListener("blur", () => {
+    window.setTimeout(hideSuggestions, 150);
+  });
+  if (stop) stop.addEventListener("click", stopCommand);
+  document.getElementById("terminal-collapse").addEventListener("click", () => {
+    setTerminalCollapsed(!terminalCollapsed(), true);
+  });
+  document.getElementById("terminal-suggestions").addEventListener("mousedown", (event) => {
+    const item = event.target.closest("li");
+    if (!item || item.dataset.index == null) return;
+    event.preventDefault();
+    acceptSuggestion(Number(item.dataset.index));
+  });
+}
+
+function onTerminalKey(event) {
+  const suggestions = state.terminal.suggestions;
+  if (event.key === "Escape") {
+    if (suggestions.length) {
+      event.preventDefault();
+      hideSuggestions();
+    } else if (state.terminal.busy) {
+      event.preventDefault();
+      stopCommand();
+    }
+    return;
+  }
+  if ((event.key === "c" || event.key === "C") && event.ctrlKey && state.terminal.busy) {
+    event.preventDefault();
+    stopCommand();
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (suggestions.length && event.target.value) {
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      state.terminal.active = (state.terminal.active + delta + suggestions.length) % suggestions.length;
+      paintSuggestions();
+      return;
+    }
+    event.preventDefault();
+    hideSuggestions();
+    recallHistory(event.key === "ArrowUp" ? -1 : 1);
+    return;
+  }
+  if (event.key === "Tab" || (event.key === "ArrowRight" && atEnd(event.target) && ghostRest())) {
+    if (!suggestions.length) return;
+    event.preventDefault();
+    acceptSuggestion(state.terminal.active);
+  }
+}
+
+function atEnd(input) {
+  return input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
+}
+
+function ghostRest() {
+  const ghost = document.getElementById("terminal-ghost");
+  return Boolean(ghost && ghost.querySelector(".rest") && ghost.querySelector(".rest").textContent);
+}
+
+function scheduleComplete() {
+  window.clearTimeout(state.terminal.timer);
+  state.terminal.timer = window.setTimeout(completeCommand, 80);
+}
+
+async function completeCommand() {
+  const input = document.getElementById("terminal-input");
+  if (!input || terminalCollapsed()) return;
+  const seq = ++state.terminal.runComplete;
+  if (state.terminal.completeAbort) state.terminal.completeAbort.abort();
+  const abort = new AbortController();
+  state.terminal.completeAbort = abort;
+  const line = input.value;
+  const cursor = input.selectionStart || 0;
+  try {
+    const payload = await api("/api/commands/complete?" + clusterQuery(), {
+      method: "POST",
+      body: JSON.stringify({ line, cursor, namespace: commandNamespace() }),
+      signal: abort.signal
+    });
+    if (seq !== state.terminal.runComplete || input.value !== line) return;
+    state.terminal.line = line;
+    state.terminal.suggestions = payload.suggestions || [];
+    state.terminal.active = 0;
+    state.terminal.replaceFrom = payload.replaceFrom || 0;
+    state.terminal.replaceTo = payload.replaceTo || 0;
+    state.terminal.hint = payload.hint || "";
+    state.terminal.usage = payload.usage || "";
+    paintSuggestions();
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    if (seq !== state.terminal.runComplete || input.value !== line) return;
+    state.terminal.suggestions = [];
+    state.terminal.hint = error.message;
+    state.terminal.usage = "";
+    paintSuggestions();
+  }
+}
+
+function paintSuggestions() {
+  const list = document.getElementById("terminal-suggestions");
+  const input = document.getElementById("terminal-input");
+  const hint = document.getElementById("terminal-hint");
+  const usage = document.getElementById("terminal-usage");
+  if (!list || !input) return;
+  const items = state.terminal.suggestions;
+  const current = items[state.terminal.active];
+  if (hint) {
+    const flagHint = current && (current.kind === "command" || current.kind === "flag" || current.kind === "value")
+      ? current.detail
+      : "";
+    hint.textContent = flagHint || state.terminal.hint;
+  }
+  if (usage) usage.textContent = state.terminal.usage;
+  list.innerHTML = "";
+  if (!items.length) {
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+    paintGhost();
+    return;
+  }
+  items.forEach((item, index) => {
+    const row = document.createElement("li");
+    row.dataset.index = String(index);
+    row.setAttribute("role", "option");
+    row.id = "terminal-option-" + index;
+    if (index === state.terminal.active) row.className = "active";
+    row.setAttribute("aria-selected", index === state.terminal.active ? "true" : "false");
+    const value = document.createElement("span");
+    value.textContent = item.value;
+    const detail = document.createElement("span");
+    detail.textContent = item.detail || "";
+    row.append(value, detail);
+    list.append(row);
+  });
+  list.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+  input.setAttribute("aria-activedescendant", "terminal-option-" + state.terminal.active);
+  const active = list.querySelector(".active");
+  if (active && active.scrollIntoView) active.scrollIntoView({ block: "nearest" });
+  paintGhost();
+}
+
+function paintGhost() {
+  const ghost = document.getElementById("terminal-ghost");
+  const input = document.getElementById("terminal-input");
+  if (!ghost || !input) return;
+  ghost.replaceChildren();
+  const suggestion = state.terminal.suggestions[state.terminal.active];
+  if (!suggestion || input.selectionStart !== input.value.length) return;
+  const token = input.value.slice(state.terminal.replaceFrom);
+  if (!suggestion.value.toLowerCase().startsWith(token.toLowerCase())) return;
+  const rest = suggestion.value.slice(token.length);
+  if (!rest) return;
+  const typed = document.createElement("span");
+  typed.className = "typed";
+  typed.textContent = input.value;
+  const more = document.createElement("span");
+  more.className = "rest";
+  more.textContent = rest;
+  ghost.append(typed, more);
+}
+
+function hideSuggestions() {
+  state.terminal.suggestions = [];
+  const list = document.getElementById("terminal-suggestions");
+  const input = document.getElementById("terminal-input");
+  if (list) list.hidden = true;
+  if (input) input.setAttribute("aria-expanded", "false");
+  paintGhost();
+}
+
+function acceptSuggestion(index) {
+  const input = document.getElementById("terminal-input");
+  const suggestion = state.terminal.suggestions[index];
+  if (!input || !suggestion || input.value !== state.terminal.line) return;
+  const insert = suggestion.value + (suggestion.value.endsWith("=") ? "" : " ");
+  const from = state.terminal.replaceFrom;
+  const to = Math.max(from, state.terminal.replaceTo);
+  input.value = input.value.slice(0, from) + insert + input.value.slice(to);
+  const caret = from + insert.length;
+  input.setSelectionRange(caret, caret);
+  hideSuggestions();
+  input.focus();
+  scheduleComplete();
+}
+
+function recallHistory(delta) {
+  const input = document.getElementById("terminal-input");
+  const history = state.terminal.history;
+  if (!input || !history.length) return;
+  if (state.terminal.cursor === history.length) state.terminal.draft = input.value;
+  const next = Math.min(history.length, Math.max(0, state.terminal.cursor + delta));
+  state.terminal.cursor = next;
+  input.value = next === history.length ? state.terminal.draft : history[next];
+  input.setSelectionRange(input.value.length, input.value.length);
+  scheduleComplete();
+}
+
+function rememberHistory(command) {
+  const history = state.terminal.history.filter((item) => item !== command);
+  history.push(command);
+  while (history.length > 40) history.shift();
+  state.terminal.history = history;
+  state.terminal.cursor = history.length;
+  state.terminal.draft = "";
+  storageSet(sessionStorage, TERMINAL_HISTORY, JSON.stringify(history));
+}
+
+function setCommandBusy(busy) {
+  state.terminal.busy = busy;
+  const run = document.getElementById("terminal-run");
+  const stop = document.getElementById("terminal-stop");
+  if (run) run.disabled = busy;
+  if (stop) stop.hidden = !busy;
+}
+
+function appendCommand(command, stdout, stderr, meta) {
+  const output = document.getElementById("terminal-output");
+  if (!output) return;
+  const entry = document.createElement("div");
+  entry.className = "term-entry";
+  const typed = document.createElement("div");
+  typed.className = "term-cmd";
+  typed.textContent = "$ " + command;
+  entry.append(typed);
+  if (stdout) {
+    const out = document.createElement("pre");
+    out.className = "term-out";
+    out.textContent = stdout;
+    entry.append(out);
+  }
+  if (stderr) {
+    const err = document.createElement("pre");
+    err.className = "term-err";
+    err.textContent = stderr;
+    entry.append(err);
+  }
+  if (!stdout && !stderr) {
+    const empty = document.createElement("pre");
+    empty.className = "term-out";
+    empty.textContent = "(no output)";
+    entry.append(empty);
+  }
+  if (meta) {
+    const note = document.createElement("div");
+    note.className = "term-meta";
+    note.textContent = meta;
+    entry.append(note);
+  }
+  output.append(entry);
+  output.scrollTop = output.scrollHeight;
+  syncCopyButtons();
+}
+
+async function runCommand(line) {
+  const command = line.trim();
+  const input = document.getElementById("terminal-input");
+  if (!command || state.terminal.busy) return;
+  hideSuggestions();
+  rememberHistory(command);
+  if (input) input.value = "";
+  paintGhost();
+  const id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+  const abort = new AbortController();
+  const run = ++state.terminal.run;
+  state.terminal.abort = abort;
+  state.terminal.commandId = id;
+  setCommandBusy(true);
+  const hint = document.getElementById("terminal-hint");
+  if (hint) hint.textContent = "Running " + command;
+  try {
+    const result = await api("/api/commands?" + clusterQuery(), {
+      method: "POST",
+      body: JSON.stringify({ command, namespace: commandNamespace(), id }),
+      signal: abort.signal
+    });
+    if (run !== state.terminal.run) return;
+    const meta = result.timedOut
+      ? "Timed out"
+      : (result.exitCode ? "exit " + result.exitCode : "");
+    appendCommand(result.command || command, result.stdout || "", result.stderr || "", meta);
+  } catch (error) {
+    if (run !== state.terminal.run) return;
+    if (error.name === "AbortError") appendCommand(command, "", "Stopped.", "");
+    else appendCommand(command, "", error.message, "");
+  } finally {
+    if (run === state.terminal.run) {
+      state.terminal.abort = null;
+      state.terminal.commandId = "";
+      setCommandBusy(false);
+      scheduleComplete();
+    }
+  }
+}
+
+function stopCommand() {
+  const id = state.terminal.commandId;
+  if (state.terminal.abort) state.terminal.abort.abort();
+  if (!id) return;
+  api("/api/commands/" + encodeURIComponent(id), { method: "DELETE" }).catch(() => {});
+}
+
+document.querySelector(".terminal-bar").insertAdjacentHTML("beforeend", copyButton("Copy command output", "terminal", "terminal-copy", false));
+paintDetail();
+
+function syncCopyButtons() {
+  const logs = document.querySelector('#view [data-copy="logs"]');
+  if (logs) {
+    const output = document.getElementById("log-output");
+    logs.disabled = !output || output.dataset.empty !== "false";
+  }
+  const edit = document.querySelector('#manage-edit [data-copy="edit-yaml"]');
+  if (edit) {
+    const box = document.getElementById("manage-yaml");
+    edit.disabled = !box || !box.value.trim();
+  }
+  const terminal = document.getElementById("terminal-copy");
+  if (terminal) {
+    const output = document.getElementById("terminal-output");
+    terminal.disabled = !output || !output.querySelector(".term-entry");
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest(".copy-icon");
+  if (!button || button.disabled) return;
+  event.preventDefault();
+  event.stopPropagation();
+  copyFromButton(button);
+}, true);
 
 document.getElementById("tabs").addEventListener("click", (event) => {
   const button = event.target.closest("button");
@@ -1386,6 +2126,7 @@ document.getElementById("clusters-open").addEventListener("click", () => {
   refresh();
 });
 installSplitters();
+installTerminal();
 document.getElementById("gate-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   state.token = document.getElementById("gate-token").value;

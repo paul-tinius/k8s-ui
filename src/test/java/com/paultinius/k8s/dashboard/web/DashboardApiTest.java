@@ -85,6 +85,8 @@ class DashboardApiTest {
                 .contains("data-tab=\"management\"")
                 .contains("id=\"detail-collapse\"")
                 .contains("id=\"namespace-collapse\"")
+                .contains("id=\"terminal-collapse\"")
+                .contains("id=\"terminal-input\"")
                 .contains("id=\"theme\"");
     }
 
@@ -423,6 +425,54 @@ class DashboardApiTest {
                 .getResponse()
                 .getContentAsString();
         assertThat(body).contains("changed").doesNotContain("The request failed");
+    }
+
+    @Test
+    void commands_demoGetPods_listsStorefront() throws Exception {
+        mockMvc.perform(post("/api/commands")
+                        .param("cluster", "demo")
+                        .contentType(MediaType.APPLICATION_JSON_VALUE)
+                        .content("""
+                                {"command":"kubectl get pods -n shop","namespace":""}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.exitCode").value(0))
+                .andExpect(jsonPath("$.stdout").value(org.hamcrest.Matchers.containsString("storefront-a")));
+    }
+
+    @Test
+    void commands_pipe_isRejected() throws Exception {
+        mockMvc.perform(post("/api/commands")
+                        .param("cluster", "demo")
+                        .contentType(MediaType.APPLICATION_JSON_VALUE)
+                        .content("""
+                                {"command":"kubectl get pods | grep store"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("shell")));
+    }
+
+    @Test
+    void commands_completeKubectlGet_suggestsPodsAndNames() throws Exception {
+        mockMvc.perform(post("/api/commands/complete")
+                        .param("cluster", "demo")
+                        .contentType(MediaType.APPLICATION_JSON_VALUE)
+                        .content("""
+                                {"line":"kubectl get po","cursor":14,"namespace":"shop"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.suggestions[?(@.value == 'pods')].detail")
+                        .value(org.hamcrest.Matchers.hasItem(org.hamcrest.Matchers.containsString("Pod"))));
+
+        mockMvc.perform(post("/api/commands/complete")
+                        .param("cluster", "demo")
+                        .contentType(MediaType.APPLICATION_JSON_VALUE)
+                        .content("""
+                                {"line":"kubectl get pods ","cursor":17,"namespace":"shop"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.suggestions[?(@.value == 'storefront-a')].kind")
+                        .value(org.hamcrest.Matchers.hasItem("name")));
     }
 
     @Test

@@ -9,6 +9,7 @@ import com.paultinius.k8s.dashboard.model.ResourceDetail;
 import com.paultinius.k8s.dashboard.model.ResourceView;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 public interface ClusterClient extends AutoCloseable {
@@ -42,6 +43,17 @@ public interface ClusterClient extends AutoCloseable {
     LogPage logs(LogRequest request);
 
     OpenForward openForward(String namespace, String targetKind, String targetName, int remotePort, int localPort);
+
+    /**
+     * Kubeconfig document for kubectl and helm. Empty when the cluster is demo or in-cluster.
+     */
+    default Optional<String> kubeconfigDocument() {
+        return Optional.empty();
+    }
+
+    default boolean inCluster() {
+        return false;
+    }
 
     @Override
     void close();
