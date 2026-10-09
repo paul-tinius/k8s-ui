@@ -1,0 +1,189 @@
+stages:
+- lint
+- build
+- package
+- scan
+- release
+
+variables:
+  HTTPS_PROXY: "${PROXY_URL}"
+  HTTP_PROXY: "${PROXY_URL}"
+  NO_PROXY: "${NO_PROXY_DOMAINS}"
+  https_proxy: "${PROXY_URL}"
+  http_proxy: "${PROXY_URL}"
+  no_proxy: "${NO_PROXY_DOMAINS}"
+  DEV_IMAGE_TAG: "0.0.0-dev-${CI_COMMIT_SHORT_SHA}"
+
+.release_rules:
+  rules:
+  - if: $CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/
+
+.dev_rules:
+  # Deliberately NOT gated on `$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH`:
+  # this must still run for every ordinary branch push and MR pipeline.
+  rules:
+  - if: $CI_COMMIT_TAG
+    when: never
+  - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+    when: never
+  - if: $CI_COMMIT_BRANCH
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+.trust-ca: &trust-ca
+  - |
+    COMBINED_CA=/tmp/combined-ca.pem
+    : > "${COMBINED_CA}"
+    if [ -n "${CI_SERVER_TLS_CA_FILE}" ]; then
+      cat "${CI_SERVER_TLS_CA_FILE}" >> "${COMBINED_CA}"
+    fi
+    if [ -n "${CA_BUNDLE_URL}" ]; then
+      wget -qO /tmp/ca-bundle.pem "${CA_BUNDLE_URL}"
+      cat /tmp/ca-bundle.pem >> "${COMBINED_CA}"
+    fi
+    if [ -s "${COMBINED_CA}" ]; then
+      export CI_SERVER_TLS_CA_FILE="${COMBINED_CA}"
+    fi
+
+hadolint:
+  stage: lint
+  image: hadolint/hadolint:2.12.0-debian
+  needs: []
+  script:
+  - hadolint Dockerfile
+
+gradle-build:
+  stage: build
+  image: gradle:8.14.5-jdk17-jammy
+  needs: []
+  cache:
+    key: "${CI_COMMIT_REF_SLUG}-gradle"
+    paths:
+    - .gradle/caches
+  variables:
+    GRADLE_USER_HOME: "${CI_PROJECT_DIR}/.gradle"
+  before_script:
+  - *trust-ca
+  - |
+    if [ -n "${CI_SERVER_TLS_CA_FILE}" ]; then
+      csplit -z -f /tmp/custom-ca- -b '%02d.pem' "${CI_SERVER_TLS_CA_FILE}" \
+        '/-----BEGIN CERTIFICATE-----/' '{*}'
+      for cert in /tmp/custom-ca-*.pem; do
+        [ -s "${cert}" ] || continue
+        keytool -importcert -noprompt -trustcacerts \
+          -alias "custom-ca-$(basename "${cert}" .pem)" \
+          -file "${cert}" \
+          -keystore "${JAVA_HOME}/lib/security/cacerts" \
+          -storepass changeit
+      done
+    fi
+  script:
+  - gradle build --no-daemon
+  artifacts:
+    when: always
+    paths:
+    - build/libs/*.jar
+    - build/reports
+    - build/test-results
+    reports:
+      junit: build/test-results/test/TEST-*.xml
+
+.kaniko_build:
+  stage: package
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [ "" ]
+  needs:
+  - job: gradle-build
+    artifacts: false
+  before_script:
+  - *trust-ca
+  - |
+    if [ -n "${CI_SERVER_TLS_CA_FILE}" ]; then
+      cat "${CI_SERVER_TLS_CA_FILE}" >> /kaniko/ssl/certs/ca-certificates.crt
+    fi
+  - mkdir -p /kaniko/.docker
+  - |
+    AUTH=$(printf '%s' "gitlab-ci-token:${CI_JOB_TOKEN}" | base64 | tr -d '\n')
+    printf '{"auths":{"%s":{"auth":"%s"}}}' "${CI_REGISTRY}" "${AUTH}" > /kaniko/.docker/config.json
+  script:
+  - |
+    /kaniko/executor \
+      --context "${CI_PROJECT_DIR}" \
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile" \
+      --destination "${CI_REGISTRY_IMAGE}:${IMAGE_TAG}" \
+      --build-arg VERSION=${CI_COMMIT_SHORT_SHA} \
+      --build-arg REVISION=${CI_COMMIT_SHA} \
+      --snapshot-mode=redo \
+      --single-snapshot \
+      --compressed-caching=false \
+      --push-retry=3
+
+kaniko:release:
+  extends:
+  - .kaniko_build
+  - .release_rules
+  variables:
+    IMAGE_TAG: "${CI_COMMIT_TAG}"
+
+kaniko:dev:
+  extends:
+  - .kaniko_build
+  - .dev_rules
+  variables:
+    IMAGE_TAG: "${DEV_IMAGE_TAG}"
+
+.trivy_scan:
+  stage: scan
+  image: aquasec/trivy:0.56.2
+  before_script:
+  - *trust-ca
+  - export TRIVY_USERNAME="gitlab-ci-token"
+  - export TRIVY_PASSWORD="${CI_JOB_TOKEN}"
+  script:
+  - trivy image --exit-code 1 --severity HIGH,CRITICAL "${CI_REGISTRY_IMAGE}:${IMAGE_TAG}"
+
+trivy:release:
+  extends:
+  - .trivy_scan
+  - .release_rules
+  needs:
+  - job: kaniko:release
+    artifacts: false
+  variables:
+    IMAGE_TAG: "${CI_COMMIT_TAG}"
+
+trivy:dev:
+  extends:
+  - .trivy_scan
+  - .dev_rules
+  needs:
+  - job: kaniko:dev
+    artifacts: false
+    optional: true
+  allow_failure: true
+  variables:
+    IMAGE_TAG: "${DEV_IMAGE_TAG}"
+
+helm:release:
+  stage: release
+  image: alpine/helm:3.15.4
+  extends:
+  - .release_rules
+  needs:
+  - job: kaniko:release
+    artifacts: false
+  - job: trivy:release
+    artifacts: false
+  variables:
+    CHART_DIR: "deploy/helm/k8s-dashboard"
+  before_script:
+  - |
+    if [ -n "${CA_BUNDLE_URL}" ]; then
+      wget -qO /usr/local/share/ca-certificates/ca-bundle.crt "${CA_BUNDLE_URL}"
+      update-ca-certificates
+    fi
+  script:
+  - CHART_VERSION="${CI_COMMIT_TAG#v}"
+  - helm package "${CHART_DIR}" --version "${CHART_VERSION}" --app-version "${CHART_VERSION}" --destination .
+  - echo "${CI_JOB_TOKEN}" | helm registry login "${CI_REGISTRY}" --username gitlab-ci-token --password-stdin
+  - helm push "k8s-dashboard-${CHART_VERSION}.tgz" "oci://${CI_REGISTRY_IMAGE}/charts"

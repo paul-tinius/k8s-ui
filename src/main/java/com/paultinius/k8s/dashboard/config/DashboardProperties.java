@@ -9,13 +9,13 @@ import java.util.List;
 @ConfigurationProperties(prefix = "dashboard")
 public class DashboardProperties {
 
-    private final Auth auth = new Auth();
+    private final Ldap ldap = new Ldap();
     private final Cluster cluster = new Cluster();
     private final Ai ai = new Ai();
     private final Live live = new Live();
 
-    public Auth getAuth() {
-        return auth;
+    public Ldap getLdap() {
+        return ldap;
     }
 
     public Cluster getCluster() {
@@ -30,15 +30,84 @@ public class DashboardProperties {
         return live;
     }
 
-    public static class Auth {
-        private String token = "";
+    public static class Ldap {
+        /**
+         * False (the default) disables LDAP entirely so the dashboard runs with
+         * no login, the same no-auth experience it had before this feature -
+         * used for local development and the demo cluster.
+         */
+        private boolean enabled = false;
+        private String host = "";
+        private int port = 3269;
+        private String defaultDomain = "";
+        private String searchBaseDn = "";
+        /** AD group CN. Only its members (via memberOf) may log in. */
+        private String group = "";
+        private String bindUsername = "";
+        private String bindPassword = "";
 
-        public String getToken() {
-            return token;
+        public boolean isEnabled() {
+            return enabled;
         }
 
-        public void setToken(String token) {
-            this.token = token;
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getHost() {
+            return host;
+        }
+
+        public void setHost(String host) {
+            this.host = host;
+        }
+
+        public int getPort() {
+            return port;
+        }
+
+        public void setPort(int port) {
+            this.port = port;
+        }
+
+        public String getDefaultDomain() {
+            return defaultDomain;
+        }
+
+        public void setDefaultDomain(String defaultDomain) {
+            this.defaultDomain = defaultDomain;
+        }
+
+        public String getSearchBaseDn() {
+            return searchBaseDn;
+        }
+
+        public void setSearchBaseDn(String searchBaseDn) {
+            this.searchBaseDn = searchBaseDn;
+        }
+
+        public String getGroup() {
+            return group;
+        }
+
+        public void setGroup(String group) {
+            this.group = group;
+        }
+
+        public String getBindUsername() {
+            return bindUsername;
+        }
+
+        public void setBindUsername(String bindUsername) {
+            this.bindUsername = bindUsername;
+        }
+
+        public String getBindPassword() {
+            return bindPassword;
+        }
+
+        public void setBindPassword(String bindPassword) {
+            this.bindPassword = bindPassword;
         }
     }
 

@@ -4,6 +4,8 @@ import com.paultinius.k8s.dashboard.cluster.ClusterClient;
 import com.paultinius.k8s.dashboard.cluster.ClusterRegistry;
 import com.paultinius.k8s.dashboard.cluster.LogRequest;
 import com.paultinius.k8s.dashboard.cluster.ResourceKind;
+import com.paultinius.k8s.dashboard.config.AiSettings;
+import com.paultinius.k8s.dashboard.config.AiSettingsStore;
 import com.paultinius.k8s.dashboard.config.DashboardProperties;
 import com.paultinius.k8s.dashboard.error.DashboardException;
 import com.paultinius.k8s.dashboard.model.AskResponse;
@@ -28,12 +30,15 @@ public class TroubleshootService {
     private final ClusterRegistry clusters;
     private final AiClient client;
     private final DashboardProperties properties;
+    private final AiSettingsStore settingsStore;
     private final LocalInsight local = new LocalInsight();
 
-    public TroubleshootService(ClusterRegistry clusters, AiClient client, DashboardProperties properties) {
+    public TroubleshootService(
+            ClusterRegistry clusters, AiClient client, DashboardProperties properties, AiSettingsStore settingsStore) {
         this.clusters = clusters;
         this.client = client;
         this.properties = properties;
+        this.settingsStore = settingsStore;
     }
 
     public AskResponse ask(
@@ -68,11 +73,12 @@ public class TroubleshootService {
 
     private ModelRequest resolve(String provider, String baseUrl, String modelName, String apiKey, String orgId) {
         DashboardProperties.Ai server = properties.getAi();
-        String name = provider == null ? "" : provider.trim();
-        String base = baseUrl == null ? "" : baseUrl.trim();
-        String chosenModel = modelName == null ? "" : modelName.trim();
-        String key = apiKey == null ? "" : apiKey.trim();
-        String org = orgId == null ? "" : orgId.trim();
+        AiSettings saved = settingsStore.current();
+        String name = firstNonBlank(provider, saved.providerName());
+        String base = firstNonBlank(baseUrl, saved.baseUrl());
+        String chosenModel = firstNonBlank(modelName, saved.model());
+        String key = firstNonBlank(apiKey, saved.apiKey());
+        String org = firstNonBlank(orgId, saved.orgId());
         if (name.isBlank() && base.isBlank() && key.isBlank()) {
             return new ModelRequest("off", "", "", "", "", server.getTimeout());
         }
@@ -93,6 +99,11 @@ public class TroubleshootService {
             org = "";
         }
         return new ModelRequest(name, base, chosenModel, key, org, server.getTimeout());
+    }
+
+    private static String firstNonBlank(String value, String fallback) {
+        String trimmed = value == null ? "" : value.trim();
+        return trimmed.isBlank() ? (fallback == null ? "" : fallback.trim()) : trimmed;
     }
 
     private static void requireHttp(String base) {

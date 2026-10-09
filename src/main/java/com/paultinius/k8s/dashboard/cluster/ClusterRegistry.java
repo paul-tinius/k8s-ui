@@ -1,6 +1,7 @@
 package com.paultinius.k8s.dashboard.cluster;
 
 import com.paultinius.k8s.dashboard.config.DashboardProperties;
+import com.paultinius.k8s.dashboard.config.DataDirs;
 import com.paultinius.k8s.dashboard.error.DashboardException;
 import com.paultinius.k8s.dashboard.live.LiveHub;
 import com.paultinius.k8s.dashboard.model.ClusterInfo;
@@ -34,10 +35,7 @@ public class ClusterRegistry {
 
     public ClusterRegistry(DashboardProperties properties, LiveHub hub) {
         this.hub = hub;
-        String configured = properties.getCluster().getDataDir();
-        this.dataDir = Path.of(configured == null || configured.isBlank()
-                ? Path.of(System.getProperty("user.home"), ".k8s-dashboard").toString()
-                : configured);
+        this.dataDir = DataDirs.resolve(properties);
         if (properties.getCluster().isDemoEnabled()) {
             DemoCluster demo = new DemoCluster();
             demo.onChange(id -> hub.publish(id, "changed"));

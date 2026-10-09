@@ -2,6 +2,8 @@ package com.paultinius.k8s.dashboard.ai;
 
 import com.paultinius.k8s.dashboard.cluster.ClusterClient;
 import com.paultinius.k8s.dashboard.cluster.ClusterRegistry;
+import com.paultinius.k8s.dashboard.config.AiSettings;
+import com.paultinius.k8s.dashboard.config.AiSettingsStore;
 import com.paultinius.k8s.dashboard.config.DashboardProperties;
 import com.paultinius.k8s.dashboard.error.DashboardException;
 import com.paultinius.k8s.dashboard.model.AskResponse;
@@ -31,11 +33,15 @@ class TroubleshootServiceTest {
     @Mock
     private ClusterClient cluster;
 
+    @Mock
+    private AiSettingsStore settingsStore;
+
     @Test
     void ask_blankProvider_staysLocalEvenWhenTheServerHasAKey() {
         DashboardProperties properties = configured();
         when(clusters.require("demo")).thenReturn(cluster);
-        TroubleshootService service = new TroubleshootService(clusters, client, properties);
+        noSavedOverride();
+        TroubleshootService service = new TroubleshootService(clusters, client, properties, settingsStore);
 
         AskResponse response = service.ask("demo", "", "", "", "why is it failing?", false, "", "", "", "", "");
 
@@ -50,7 +56,8 @@ class TroubleshootServiceTest {
         when(clusters.require("demo")).thenReturn(cluster);
         when(cluster.info()).thenReturn(new ClusterInfo("demo", "Demo", "https://demo", "shop", true, true, "demo"));
         when(client.complete(any(), any(), any())).thenReturn("from the model");
-        TroubleshootService service = new TroubleshootService(clusters, client, properties);
+        noSavedOverride();
+        TroubleshootService service = new TroubleshootService(clusters, client, properties, settingsStore);
 
         AskResponse response = service.ask(
                 "demo", "", "", "", "why is it failing?", false,
@@ -72,7 +79,8 @@ class TroubleshootServiceTest {
         when(clusters.require("demo")).thenReturn(cluster);
         when(cluster.info()).thenReturn(new ClusterInfo("demo", "Demo", "https://demo", "shop", true, true, "demo"));
         when(client.complete(any(), any(), any())).thenReturn("from the model");
-        TroubleshootService service = new TroubleshootService(clusters, client, configured());
+        noSavedOverride();
+        TroubleshootService service = new TroubleshootService(clusters, client, configured(), settingsStore);
 
         service.ask("demo", "", "", "", "why is it failing?", false, "Acme", "https://models.example/v1", "", "browser-key", "");
 
@@ -83,7 +91,8 @@ class TroubleshootServiceTest {
 
     @Test
     void ask_missingBaseUrl_isRejected() {
-        TroubleshootService service = new TroubleshootService(clusters, client, configured());
+        noSavedOverride();
+        TroubleshootService service = new TroubleshootService(clusters, client, configured(), settingsStore);
 
         assertThatThrownBy(() -> service.ask("demo", "", "", "", "why is it failing?", false, "Acme", "", "", "browser-key", ""))
                 .isInstanceOf(DashboardException.class)
@@ -93,7 +102,8 @@ class TroubleshootServiceTest {
 
     @Test
     void ask_devinWithoutOrganization_isRejected() {
-        TroubleshootService service = new TroubleshootService(clusters, client, new DashboardProperties());
+        noSavedOverride();
+        TroubleshootService service = new TroubleshootService(clusters, client, new DashboardProperties(), settingsStore);
 
         assertThatThrownBy(() -> service.ask(
                 "demo", "", "", "", "why is it failing?", false,
@@ -101,6 +111,28 @@ class TroubleshootServiceTest {
                 .isInstanceOf(DashboardException.class)
                 .hasMessageContaining("organization id");
         verify(client, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void ask_blankRequest_fallsBackToTheSavedAssistConfiguration() {
+        when(clusters.require("demo")).thenReturn(cluster);
+        when(cluster.info()).thenReturn(new ClusterInfo("demo", "Demo", "https://demo", "shop", true, true, "demo"));
+        when(client.complete(any(), any(), any())).thenReturn("from the saved config");
+        when(settingsStore.current()).thenReturn(
+                new AiSettings("Acme", "https://models.example/v1", "acme-large", "saved-key", ""));
+        TroubleshootService service = new TroubleshootService(clusters, client, configured(), settingsStore);
+
+        AskResponse response = service.ask("demo", "", "", "", "why is it failing?", false, "", "", "", "", "");
+
+        assertThat(response.modelUsed()).isTrue();
+        ArgumentCaptor<ModelRequest> captor = ArgumentCaptor.forClass(ModelRequest.class);
+        verify(client).complete(captor.capture(), any(), any());
+        assertThat(captor.getValue().baseUrl()).isEqualTo("https://models.example/v1");
+        assertThat(captor.getValue().apiKey()).isEqualTo("saved-key");
+    }
+
+    private void noSavedOverride() {
+        when(settingsStore.current()).thenReturn(new AiSettings("", "", "", "", ""));
     }
 
     private static DashboardProperties configured() {

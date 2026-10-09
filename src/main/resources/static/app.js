@@ -1,13 +1,4 @@
-const AI_KEYS = {
-  name: "k8s-dashboard-ai-provider",
-  baseUrl: "k8s-dashboard-ai-base-url",
-  model: "k8s-dashboard-ai-model",
-  apiKey: "k8s-dashboard-ai-key",
-  org: "k8s-dashboard-ai-org"
-};
-
 const state = {
-  token: sessionStorage.getItem("k8s-dashboard-token") || "",
   clusters: [],
   clusterId: "",
   namespaces: [],
@@ -16,20 +7,61 @@ const state = {
   tab: "overview",
   shellTab: "",
   resources: [],
+  sort: {},
+  gridPage: {},
+  collapsedGroups: {},
+  metricsSort: { key: "pod", dir: "asc" },
+  metricsPage: 1,
+  attentionSort: { key: "namespace", dir: "asc" },
+  attentionPage: 1,
+  columnWidths: loadColumnWidths(),
   overview: null,
   selection: null,
   detail: null,
   live: true,
+  refreshInterval: 5000,
+  liveTimer: 0,
+  lastAutoRefresh: 0,
   logs: { deployment: "", pod: "", container: "", tail: "100", q: "", lines: [] },
   forwards: [],
-  management: { namespaceName: "", clusterName: "", kubeconfig: "", kind: "deployments", editing: null, yaml: "" },
-  ai: Object.assign({
+  management: {
+    tab: "resources", focusClusterName: false,
+    namespaceName: "", clusterName: "", kubeconfig: "", kind: "deployments", editing: null, yaml: "",
+    ldap: {
+      loaded: false,
+      saving: false,
+      message: "",
+      enabled: false,
+      host: "",
+      port: 3269,
+      defaultDomain: "",
+      searchBaseDn: "",
+      group: "",
+      bindUsername: "",
+      bindPassword: "",
+      clearBindPassword: false,
+      hasBindPassword: false,
+      restartRequired: false
+    }
+  },
+  ai: {
     question: "Why is this unhealthy?",
     includeLogs: true,
     answer: "",
-    busy: false
-  }, loadAiSettings()),
+    busy: false,
+    loaded: false,
+    saving: false,
+    message: "",
+    providerName: "",
+    baseUrl: "",
+    model: "",
+    apiKey: "",
+    clearApiKey: false,
+    hasApiKey: false,
+    orgId: ""
+  },
   notice: "",
+  refreshing: false,
   source: null,
   timer: 0,
   terminal: {
@@ -59,6 +91,14 @@ const MANAGE_KINDS = [
   ["services", "Services"],
   ["configmaps", "ConfigMaps"]
 ];
+
+const MANAGEMENT_TABS = {
+  resources: "Resources",
+  namespaces: "Namespaces",
+  clusters: "Clusters",
+  ai: "AI assist",
+  ldap: "LDAP login"
+};
 
 const tabs = {
   overview: "Overview",
@@ -104,48 +144,82 @@ function applyTheme(theme) {
   storageSet(localStorage, THEME_KEY, choice);
 }
 
-function loadAiSettings() {
-  if (storageGet(localStorage, AI_KEYS.name) === null
-      && storageGet(localStorage, AI_KEYS.baseUrl) === null
-      && storageGet(localStorage, AI_KEYS.model) === null
-      && storageGet(localStorage, AI_KEYS.apiKey) === null) {
-    migrateAiSettings();
-  }
-  return {
-    providerName: storageGet(localStorage, AI_KEYS.name) || "",
-    baseUrl: storageGet(localStorage, AI_KEYS.baseUrl) || "",
-    model: storageGet(localStorage, AI_KEYS.model) || "",
-    apiKey: storageGet(localStorage, AI_KEYS.apiKey) || "",
-    orgId: storageGet(localStorage, AI_KEYS.org) || ""
-  };
+const REFRESH_INTERVAL_KEY = "k8s-dashboard-refresh-interval";
+const REFRESH_INTERVALS = [2000, 5000, 10000, 15000, 20000, 25000, 30000, 60000];
+// "manual" means no timer-driven or change-driven auto-refresh at all: the user has
+// to press a refresh button for anything to update.
+const REFRESH_MANUAL = "manual";
+
+function storedRefreshInterval() {
+  const saved = storageGet(localStorage, REFRESH_INTERVAL_KEY);
+  if (saved === REFRESH_MANUAL) return REFRESH_MANUAL;
+  const parsed = parseInt(saved, 10);
+  return REFRESH_INTERVALS.includes(parsed) ? parsed : 5000;
 }
 
-// Older builds stored a preset id in sessionStorage. Copy it once into localStorage.
-function migrateAiSettings() {
-  const known = {
-    xai: ["Grok", "https://api.x.ai/v1", "grok-4.7"],
-    openai: ["OpenAI", "https://api.openai.com/v1", "gpt-4.1"],
-    "openrouter-claude": ["Claude", "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4"],
-    "openrouter-gemini": ["Gemini", "https://openrouter.ai/api/v1", "google/gemini-2.5-pro"],
-    deepseek: ["DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"],
-    qwen: ["Qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"],
-    ollama: ["Ollama", "http://127.0.0.1:11434/v1", "llama3.1"],
-    lmstudio: ["LM Studio", "http://127.0.0.1:1234/v1", "local-model"],
-    devin: ["Devin", "https://api.devin.ai/v3", "lite"]
-  };
-  const preset = storageGet(sessionStorage, "k8s-dashboard-ai-preset");
-  const match = preset ? known[preset] : null;
-  storageSet(localStorage, AI_KEYS.name, match ? match[0] : "");
-  storageSet(localStorage, AI_KEYS.baseUrl, match ? match[1] : "");
-  storageSet(localStorage, AI_KEYS.model, match ? match[2] : "");
-  storageSet(localStorage, AI_KEYS.apiKey, match ? (storageGet(sessionStorage, "k8s-dashboard-ai-key") || "") : "");
-  storageSet(localStorage, AI_KEYS.org, preset === "devin" ? (storageGet(sessionStorage, "k8s-dashboard-ai-org") || "") : "");
+function applyRefreshInterval(interval) {
+  const choice = interval === REFRESH_MANUAL || REFRESH_INTERVALS.includes(interval) ? interval : 5000;
+  state.refreshInterval = choice;
+  const select = document.getElementById("refresh-interval");
+  if (select && select.value !== String(choice)) select.value = String(choice);
+  storageSet(localStorage, REFRESH_INTERVAL_KEY, String(choice));
+  const live = document.getElementById("live");
+  if (live) {
+    const manual = choice === REFRESH_MANUAL;
+    live.disabled = manual;
+    live.closest("label").title = manual ? "Live is paused while Refresh is set to Manual" : "";
+  }
+  startLiveTimer();
+}
+
+const COLUMN_WIDTHS_KEY = "k8s-dashboard-column-widths";
+
+// Manually resized column widths, keyed by tab then column label, so a resize
+// made on pods doesn't leak onto deployments and survives a page reload.
+function loadColumnWidths() {
+  try {
+    const saved = JSON.parse(storageGet(localStorage, COLUMN_WIDTHS_KEY) || "{}");
+    return saved && typeof saved === "object" ? saved : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveColumnWidths() {
+  storageSet(localStorage, COLUMN_WIDTHS_KEY, JSON.stringify(state.columnWidths));
+}
+
+// Drives the periodic auto-refresh while Live is on, at the user-selected cadence
+// (independent of the server's SSE "changed" push, which still kicks an immediate
+// refresh when something actually changes on the cluster).
+function startLiveTimer() {
+  window.clearInterval(state.liveTimer);
+  if (!state.live || state.refreshInterval === REFRESH_MANUAL) return;
+  state.liveTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    state.lastAutoRefresh = Date.now();
+    refresh();
+  }, state.refreshInterval);
 }
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[char]));
+}
+
+const htmlCache = new WeakMap();
+
+// Only touches the DOM when the markup actually changed, so a periodic refresh
+// with unchanged data doesn't tear down and rebuild rows (which is what causes
+// tables to visibly flicker and lose scroll position / hover state).
+// Returns true when the element was updated, false when the write was skipped.
+function setHTML(element, html) {
+  if (!element) return false;
+  if (htmlCache.get(element) === html) return false;
+  htmlCache.set(element, html);
+  element.innerHTML = html;
+  return true;
 }
 
 const COPY_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1"/></svg>`;
@@ -160,6 +234,25 @@ function copyButton(label, mode, id, enabled) {
 
 function configMapCopyButton(resource) {
   return `<button type="button" class="copy-icon" data-copy="configmap" data-namespace="${esc(resource.namespace)}" data-name="${esc(resource.name)}" aria-label="Copy ${esc(resource.name)}" title="Copy">${COPY_ICON}</button>`;
+}
+
+const REFRESH_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`;
+
+// A single element per shell (id="tab-refresh") so paintShell only needs to wire the click
+// handler once; paintRefreshState() finds it (and any other .refresh-btn) to toggle the spin.
+function refreshButton(label) {
+  return `<button type="button" class="icon-button refresh-btn" id="tab-refresh" aria-label="${esc(label)}" title="${esc(label)}">${REFRESH_ICON}</button>`;
+}
+
+// Reflects whether a refresh is in flight: spins every refresh button currently on screen and
+// shows/hides the "Refreshing…" status next to the counts, so a slow fetch (e.g. many namespaces)
+// never looks stuck or - the bug this replaces - like a silent flash of new content.
+function paintRefreshState() {
+  document.querySelectorAll(".refresh-btn").forEach((button) => {
+    button.classList.toggle("spinning", state.refreshing);
+  });
+  const status = document.getElementById("refresh-status");
+  if (status) status.innerHTML = state.refreshing ? `${REFRESH_ICON}<span>Refreshing…</span>` : "";
 }
 
 function configDataText(yaml) {
@@ -288,14 +381,27 @@ function notice(message) {
   document.getElementById("notice").textContent = state.notice;
 }
 
+function csrfCookie() {
+  const match = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 async function api(path, options = {}) {
+  const method = options.method || "GET";
   const headers = { Accept: "application/json" };
   if (options.body) headers["Content-Type"] = "application/json";
-  if (state.token) headers.Authorization = "Bearer " + state.token;
+  // A session cookie, not a bearer token, carries auth now. Mutating
+  // requests still need the CSRF header the cookie-backed token repository
+  // expects; GETs are exempt from CSRF checks so this is harmless either way.
+  if (method !== "GET" && method !== "HEAD") {
+    const token = csrfCookie();
+    if (token) headers["X-XSRF-TOKEN"] = token;
+  }
   const response = await fetch(path, {
-    method: options.method || "GET",
+    method,
     headers,
     body: options.body,
+    credentials: "same-origin",
     signal: options.signal
   });
   if (response.status === 401) {
@@ -319,17 +425,115 @@ function namespaceQuery() {
   return "&namespaces=" + encodeURIComponent(names.join(","));
 }
 
+// True once namespaces have loaded for the cluster and the user has unchecked every one of
+// them. Leaving the namespaces param off a request (what namespaceQuery() does when nothing is
+// selected) reads server-side as "no filter", i.e. every namespace - so every view that is
+// scoped by namespace must check this first and show nothing instead of quietly falling back
+// to showing everything.
+function namespaceScopeEmpty() {
+  return state.namespaces.length > 0 && state.selectedNamespaces.size === 0;
+}
+
+// Human-readable summary of the namespace selection, used anywhere a resource tab reports
+// how many namespaces it's scoped to. Beyond just the count, this names the namespace(s) so
+// a single selection reads as "namespace: foo" rather than the indistinguishable "1 namespace"
+// every tab used to show.
+function namespaceSummary() {
+  const total = state.namespaces.length;
+  const selected = state.selectedNamespaces.size;
+  if (total === 0) return "no namespaces";
+  if (selected === 0) return "no namespaces selected";
+  if (selected === total) return "all " + total + " namespaces";
+  const names = [...state.selectedNamespaces].sort().join(", ");
+  return (selected === 1 ? "namespace" : selected + " namespaces") + " (" + names + ")";
+}
+
 function filterQuery() {
   const query = document.getElementById("query").value.trim();
   const label = document.getElementById("label").value.trim();
   const image = document.getElementById("image").value.trim();
   const node = document.getElementById("node").value.trim();
+  const name = document.getElementById("name").value.trim();
   let extra = "";
   if (query) extra += "&q=" + encodeURIComponent(query);
   if (label) extra += "&label=" + encodeURIComponent(label);
   if (image) extra += "&image=" + encodeURIComponent(image);
   if (node) extra += "&node=" + encodeURIComponent(node);
+  if (name) extra += "&name=" + encodeURIComponent(name);
+  if (state.tab === "pods") {
+    const status = document.getElementById("status").value.trim();
+    if (status) extra += "&status=" + encodeURIComponent(status);
+  }
   return extra;
+}
+
+async function suggestNamespaces(query, signal) {
+  if (!state.clusterId) return [];
+  const names = await api("/api/namespaces?" + clusterQuery(), { signal });
+  const lower = query.toLowerCase();
+  return (names || []).filter((name) => name.toLowerCase().includes(lower));
+}
+
+async function suggestResourceNames(kind, namespaces, query, signal) {
+  if (!state.clusterId) return [];
+  let path = "/api/resources?" + clusterQuery() + "&kind=" + encodeURIComponent(kind);
+  if (namespaces && namespaces.length) path += "&namespaces=" + encodeURIComponent(namespaces.join(","));
+  const items = await api(path, { signal });
+  const lower = query.toLowerCase();
+  return (items || []).map((item) => item.name).filter((name) => name.toLowerCase().includes(lower));
+}
+
+async function suggestContainers(namespaces, deployment, pod, query, signal) {
+  if (!state.clusterId) return [];
+  let path = "/api/containers?" + clusterQuery();
+  if (namespaces && namespaces.length) path += "&namespaces=" + encodeURIComponent(namespaces.join(","));
+  if (deployment) path += "&deployment=" + encodeURIComponent(deployment);
+  if (pod) path += "&pod=" + encodeURIComponent(pod);
+  const names = await api(path, { signal });
+  const lower = query.toLowerCase();
+  return (names || []).filter((name) => name.toLowerCase().includes(lower));
+}
+
+const RESOURCE_TABS = new Set(["pods", "deployments", "services", "configmaps", "nodes", "events"]);
+
+// Label/image/node suggestions come from the resources currently in view
+// (the active tab's kind, in the selected namespaces) rather than from the
+// already-filtered grid, so picking one value doesn't hide the others.
+async function suggestFromResources(extract, query, signal) {
+  if (!state.clusterId || !RESOURCE_TABS.has(state.tab)) return [];
+  const kind = tabs[state.tab];
+  const path = "/api/resources?" + clusterQuery() + "&kind=" + encodeURIComponent(kind) + namespaceQuery();
+  const items = await api(path, { signal });
+  const lower = query.toLowerCase();
+  const values = new Set();
+  (items || []).forEach((item) => extract(item).forEach((value) => {
+    if (value) values.add(value);
+  }));
+  return [...values].filter((value) => value.toLowerCase().includes(lower));
+}
+
+function suggestLabels(query, signal) {
+  return suggestFromResources(
+    (item) => Object.entries(item.labels || {}).map(([key, value]) => key + "=" + value),
+    query,
+    signal
+  );
+}
+
+function suggestImages(query, signal) {
+  return suggestFromResources((item) => item.images || [], query, signal);
+}
+
+function suggestNodes(query, signal) {
+  return suggestFromResources((item) => [item.node], query, signal);
+}
+
+function suggestStatuses(query, signal) {
+  return suggestFromResources((item) => [item.status], query, signal);
+}
+
+function suggestNames(query, signal) {
+  return suggestFromResources((item) => [item.name], query, signal);
 }
 
 async function loadClusters() {
@@ -355,7 +559,12 @@ async function loadNamespaces(selectAll) {
   }
   state.namespaces = await api("/api/namespaces?" + clusterQuery());
   const key = state.namespaces.join("|");
-  if (selectAll || state.selectedNamespaces.size === 0) {
+  // namespaceKey is only ever "" before namespaces have been loaded for any cluster, so that -
+  // not an empty selection - is what means "first load, default to everything". Once it's been
+  // set, an empty selection means the user unchecked every namespace on purpose and a routine
+  // reload (e.g. after creating/editing/deleting a resource) must not snap it back to "all".
+  const firstLoad = state.namespaceKey === "";
+  if (selectAll || (firstLoad && state.selectedNamespaces.size === 0)) {
     state.selectedNamespaces = new Set(state.namespaces);
   } else if (key !== state.namespaceKey) {
     const known = new Set(state.namespaceKey.split("|").filter(Boolean));
@@ -371,20 +580,22 @@ async function loadNamespaces(selectAll) {
 
 function paintNamespaces() {
   const host = document.getElementById("namespace-list");
-  host.innerHTML = state.namespaces.map((name) => `
+  const html = state.namespaces.map((name) => `
     <div class="ns">
       <input type="checkbox" value="${esc(name)}" aria-label="${esc(name)}" ${state.selectedNamespaces.has(name) ? "checked" : ""}>
       <span class="ns-name">${esc(name)}</span>
     </div>
   `).join("") || `<p class="muted">No namespaces</p>`;
-  host.querySelectorAll("input").forEach((input) => {
-    input.addEventListener("change", () => {
-      if (input.checked) state.selectedNamespaces.add(input.value);
-      else state.selectedNamespaces.delete(input.value);
-      paintTerminalContext();
-      refresh();
+  if (setHTML(host, html)) {
+    host.querySelectorAll("input").forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input.checked) state.selectedNamespaces.add(input.value);
+        else state.selectedNamespaces.delete(input.value);
+        paintTerminalContext();
+        refresh();
+      });
     });
-  });
+  }
   paintTerminalContext();
 }
 
@@ -392,7 +603,7 @@ function paintShell() {
   const view = document.getElementById("view");
   if (state.tab === "logs") {
     view.innerHTML = `
-      <div class="tab-tools">${copyButton("Copy logs", "logs", "", false)}</div>
+      <div class="tab-tools">${copyButton("Copy logs", "logs", "", false)}${refreshButton("Refresh logs")}</div>
       <div class="inline">
         <label>Deployment <input id="log-deployment" value="${esc(state.logs.deployment)}" placeholder="storefront"></label>
         <label>Pod <input id="log-pod" value="${esc(state.logs.pod)}" placeholder="optional"></label>
@@ -407,8 +618,21 @@ function paintShell() {
       document.getElementById(id).addEventListener("change", captureLogs);
     });
     document.getElementById("log-tail").addEventListener("change", captureLogs);
+    attachPrediction(document.getElementById("log-deployment"), (query, signal) =>
+      suggestResourceNames("deployments", [...state.selectedNamespaces], query, signal));
+    attachPrediction(document.getElementById("log-pod"), (query, signal) =>
+      suggestResourceNames("pods", [...state.selectedNamespaces], query, signal));
+    attachPrediction(document.getElementById("log-container"), (query, signal) =>
+      suggestContainers(
+        [...state.selectedNamespaces],
+        document.getElementById("log-deployment").value.trim(),
+        document.getElementById("log-pod").value.trim(),
+        query,
+        signal
+      ));
   } else if (state.tab === "forwards") {
     view.innerHTML = `
+      <div class="tab-tools">${refreshButton("Refresh port forwards")}</div>
       <form id="forward-form" class="inline">
         <select id="forward-kind"><option>pod</option><option>service</option></select>
         <input id="forward-namespace" placeholder="namespace" required>
@@ -419,116 +643,167 @@ function paintShell() {
       </form>
       <div id="forward-list"></div>`;
     document.getElementById("forward-form").addEventListener("submit", openForward);
+    attachPrediction(document.getElementById("forward-namespace"), (query, signal) =>
+      suggestNamespaces(query, signal));
+    attachPrediction(document.getElementById("forward-name"), (query, signal) => {
+      const kind = document.getElementById("forward-kind").value === "service" ? "services" : "pods";
+      const namespace = document.getElementById("forward-namespace").value.trim();
+      return suggestResourceNames(kind, namespace ? [namespace] : [], query, signal);
+    });
   } else if (state.tab === "assist") {
     view.innerHTML = `
       <div class="panel assist">
         <div class="panel-head"><h2>Assist</h2>${copyButton("Copy answer", "assist", "ai-copy")}</div>
-        <p id="ai-status" class="muted"></p>
-        <label>Provider name <input id="ai-provider" autocomplete="off" maxlength="80" placeholder="Grok" value="${esc(state.ai.providerName)}"></label>
-        <label>Base URL <input id="ai-base-url" autocomplete="off" maxlength="500" placeholder="https://api.x.ai/v1" value="${esc(state.ai.baseUrl)}"></label>
-        <label>Model <input id="ai-model" autocomplete="off" maxlength="120" placeholder="grok-4.7" value="${esc(state.ai.model)}"></label>
-        <label>API key
-          <div class="secret">
-            <input id="ai-key" type="password" autocomplete="off" maxlength="512" value="${esc(state.ai.apiKey)}">
-            <button type="button" id="ai-key-toggle" aria-label="Show API key" aria-pressed="false">
-              <svg class="eye-on" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></svg>
-              <svg class="eye-off" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.5 6.2A10.6 10.6 0 0 1 12 6c6.5 0 10 6 10 6a18 18 0 0 1-3.1 3.7"/><path d="M6.2 6.8C3.9 8.4 2 12 2 12s3.5 6 10 6c1.1 0 2.2-.2 3.2-.6"/><path d="M9.9 9.9a2.5 2.5 0 0 0 3.6 3.6"/></svg>
-            </button>
-          </div>
-        </label>
-        <label id="ai-org-field" class="${usingDevin() ? "" : "hidden"}">Devin organization id <input id="ai-org" autocomplete="off" placeholder="org-..." value="${esc(state.ai.orgId)}">
-          <span class="muted">From Settings, then Devin API.</span>
-        </label>
-        <p class="muted">The provider name, base URL, model, and API key stay in this browser and are sent only with Ask. Leave them blank for a local check.</p>
-        <label>Question <textarea id="ai-question">${esc(state.ai.question)}</textarea></label>
+        <p class="muted">Set the provider, model, and API key under Management. <button type="button" id="assist-open-config">Open Management</button></p>
         <label class="inline"><input id="ai-logs" type="checkbox" ${state.ai.includeLogs ? "checked" : ""}> Include recent logs</label>
+        <label>Question <textarea id="ai-question">${esc(state.ai.question)}</textarea></label>
         <div class="actions">
           <button class="primary" id="ai-ask" type="button">Ask</button>
         </div>
         <textarea id="ai-answer" class="answer" readonly aria-label="Assist answer"></textarea>
       </div>`;
-    document.getElementById("ai-provider").addEventListener("input", saveAiChoice);
-    document.getElementById("ai-base-url").addEventListener("input", saveAiChoice);
-    document.getElementById("ai-model").addEventListener("input", saveAiChoice);
-    document.getElementById("ai-key").addEventListener("input", saveAiChoice);
-    document.getElementById("ai-key-toggle").addEventListener("click", toggleApiKey);
-    document.getElementById("ai-org").addEventListener("input", saveAiChoice);
-    document.getElementById("ai-ask").addEventListener("click", ask);
-    toggleAiFields();
-  } else if (state.tab === "management") {
-    view.innerHTML = `
-      <div class="stack">
-        <div class="panel manage">
-          <h2>Resources</h2>
-          <p class="muted">Edit applies the manifest. Delete removes that resource. A pod owned by a deployment is replaced.</p>
-          <label class="inline">Kind
-            <select id="manage-kind">
-              ${MANAGE_KINDS.map(([value, label]) => `<option value="${value}"${state.management.kind === value ? " selected" : ""}>${label}</option>`).join("")}
-            </select>
-          </label>
-          <div id="manage-resources"></div>
-          <form id="manage-edit" class="${state.management.editing ? "" : "hidden"}">
-            <div class="panel-head"><h3 id="manage-edit-title"></h3>${copyButton("Copy manifest", "edit-yaml", "", false)}</div>
-            <textarea id="manage-yaml">${esc(state.management.yaml)}</textarea>
-            <div class="actions"><button class="primary" type="submit">Save</button><button type="button" id="manage-edit-cancel">Cancel</button></div>
-          </form>
-        </div>
-        <div class="panel manage">
-          <h2>Namespaces</h2>
-          <p id="manage-cluster" class="muted"></p>
-          <form id="namespace-form" class="inline">
-            <input id="namespace-name" placeholder="billing" maxlength="63" autocomplete="off" value="${esc(state.management.namespaceName)}" required>
-            <button class="primary" type="submit">Create</button>
-          </form>
-          <p class="muted">Deleting a namespace removes everything in it. System namespaces stay.</p>
-          <div id="namespace-rows"></div>
-        </div>
-        <div class="panel manage">
-          <h2>Clusters</h2>
-          <div id="cluster-rows"></div>
-          <h3>Add kubeconfig</h3>
-          <p class="muted">Paste the YAML or choose a file. Stored under the server data directory with user-only permissions. Every context becomes a cluster. The file is not sent to a model.</p>
-          <label class="cluster-file">Kubeconfig file <input id="cluster-file" type="file" accept=".yml,.yaml,.conf,.kubeconfig,text/yaml,application/yaml,text/plain"></label>
-          <input id="cluster-name" placeholder="Display name for a single context" value="${esc(state.management.clusterName)}">
-          <textarea id="cluster-kubeconfig" placeholder="apiVersion: v1&#10;kind: Config">${esc(state.management.kubeconfig)}</textarea>
-          <div class="actions"><button class="primary" id="cluster-add" type="button">Add</button></div>
-        </div>
-      </div>`;
-    document.getElementById("manage-kind").addEventListener("change", (event) => {
-      state.management.kind = event.target.value;
-      closeManagedEdit();
+    document.getElementById("assist-open-config").addEventListener("click", () => {
+      state.tab = "management";
+      state.management.tab = "ai";
+      state.shellTab = "";
       refresh();
     });
-    document.getElementById("manage-yaml").addEventListener("input", (event) => {
-      state.management.yaml = event.target.value;
-      syncCopyButtons();
+    document.getElementById("ai-ask").addEventListener("click", ask);
+  } else if (state.tab === "management") {
+    const managementTab = state.management.tab;
+    view.innerHTML = `
+      <nav class="tabs sub-tabs" id="management-tabs">
+        ${Object.entries(MANAGEMENT_TABS).map(([value, label]) =>
+          `<button type="button" data-management-tab="${value}" class="${managementTab === value ? "active" : ""}">${esc(label)}</button>`).join("")}
+      </nav>
+      ${managementTab === "resources" ? `
+        <div class="tab-tools">${refreshButton("Refresh resources")}</div>
+        <div class="stack">
+          <div class="panel manage">
+            <h2>Resources</h2>
+            <p class="muted">Edit applies the manifest. Delete removes that resource. A pod owned by a deployment is replaced.</p>
+            <label class="inline">Kind
+              <select id="manage-kind">
+                ${MANAGE_KINDS.map(([value, label]) => `<option value="${value}"${state.management.kind === value ? " selected" : ""}>${label}</option>`).join("")}
+              </select>
+            </label>
+            <div id="manage-resources"></div>
+            <form id="manage-edit" class="${state.management.editing ? "" : "hidden"}">
+              <div class="panel-head"><h3 id="manage-edit-title"></h3>${copyButton("Copy manifest", "edit-yaml", "", false)}</div>
+              <textarea id="manage-yaml">${esc(state.management.yaml)}</textarea>
+              <div class="actions"><button class="primary" type="submit">Save</button><button type="button" id="manage-edit-cancel">Cancel</button></div>
+            </form>
+          </div>
+        </div>` : ""}
+      ${managementTab === "namespaces" ? `
+        <div class="tab-tools">${refreshButton("Refresh namespaces")}</div>
+        <div class="stack">
+          <div class="panel manage">
+            <h2>Namespaces</h2>
+            <p id="manage-cluster" class="muted"></p>
+            <form id="namespace-form" class="inline">
+              <input id="namespace-name" placeholder="billing" maxlength="63" autocomplete="off" value="${esc(state.management.namespaceName)}" required>
+              <button class="primary" type="submit">Create</button>
+            </form>
+            <p class="muted">Deleting a namespace removes everything in it. System namespaces stay.</p>
+            <div id="namespace-rows"></div>
+          </div>
+        </div>` : ""}
+      ${managementTab === "clusters" ? `
+        <div class="tab-tools">${refreshButton("Refresh clusters")}</div>
+        <div class="stack">
+          <div class="panel manage" id="cluster-panel">
+            <h2>Clusters</h2>
+            <div id="cluster-rows"></div>
+            <h3>Add kubeconfig</h3>
+            <p class="muted">Paste the YAML or choose a file. Stored under the server data directory with user-only permissions. Every context becomes a cluster. The file is not sent to a model.</p>
+            <label class="cluster-file">Kubeconfig file <input id="cluster-file" type="file" accept=".yml,.yaml,.conf,.kubeconfig,text/yaml,application/yaml,text/plain"></label>
+            <input id="cluster-name" placeholder="Display name for a single context" value="${esc(state.management.clusterName)}">
+            <textarea id="cluster-kubeconfig" placeholder="apiVersion: v1&#10;kind: Config">${esc(state.management.kubeconfig)}</textarea>
+            <div class="actions"><button class="primary" id="cluster-add" type="button">Add</button></div>
+          </div>
+        </div>` : ""}
+      ${managementTab === "ai" ? `<div class="panel manage" id="ai-config-panel"></div>` : ""}
+      ${managementTab === "ldap" ? `<div class="panel manage" id="ldap-panel"></div>` : ""}`;
+    document.getElementById("management-tabs").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-management-tab]");
+      if (!button) return;
+      state.management.tab = button.dataset.managementTab;
+      // refresh() only rebuilds the view's HTML when state.shellTab !== state.tab,
+      // and state.tab stays "management" across sub-tabs - force that rebuild the
+      // same way switching a top-level tab does, or the new sub-tab's panel never
+      // actually renders.
+      state.shellTab = "";
+      refresh();
     });
-    document.getElementById("manage-edit").addEventListener("submit", saveManagedResource);
-    document.getElementById("manage-edit-cancel").addEventListener("click", closeManagedEdit);
-    if (state.management.editing) setManagedEditTitle(state.management.editing);
-    document.getElementById("namespace-name").addEventListener("input", (event) => {
-      state.management.namespaceName = event.target.value;
-    });
-    document.getElementById("namespace-form").addEventListener("submit", createNamespace);
-    document.getElementById("cluster-name").addEventListener("input", (event) => {
-      state.management.clusterName = event.target.value;
-    });
-    document.getElementById("cluster-kubeconfig").addEventListener("input", (event) => {
-      state.management.kubeconfig = event.target.value;
-    });
-    document.getElementById("cluster-file").addEventListener("change", (event) => {
-      const file = event.target.files && event.target.files[0];
-      loadKubeconfigFile(file);
-    });
-    document.getElementById("cluster-add").addEventListener("click", addCluster);
+    if (managementTab === "resources") {
+      document.getElementById("manage-kind").addEventListener("change", (event) => {
+        state.management.kind = event.target.value;
+        closeManagedEdit();
+        refresh();
+      });
+      document.getElementById("manage-yaml").addEventListener("input", (event) => {
+        state.management.yaml = event.target.value;
+        syncCopyButtons();
+      });
+      document.getElementById("manage-edit").addEventListener("submit", saveManagedResource);
+      document.getElementById("manage-edit-cancel").addEventListener("click", closeManagedEdit);
+      if (state.management.editing) setManagedEditTitle(state.management.editing);
+    } else if (managementTab === "namespaces") {
+      document.getElementById("namespace-name").addEventListener("input", (event) => {
+        state.management.namespaceName = event.target.value;
+      });
+      document.getElementById("namespace-form").addEventListener("submit", createNamespace);
+    } else if (managementTab === "clusters") {
+      document.getElementById("cluster-name").addEventListener("input", (event) => {
+        state.management.clusterName = event.target.value;
+      });
+      document.getElementById("cluster-kubeconfig").addEventListener("input", (event) => {
+        state.management.kubeconfig = event.target.value;
+      });
+      document.getElementById("cluster-file").addEventListener("change", (event) => {
+        const file = event.target.files && event.target.files[0];
+        loadKubeconfigFile(file);
+      });
+      document.getElementById("cluster-add").addEventListener("click", addCluster);
+      if (state.management.focusClusterName) {
+        state.management.focusClusterName = false;
+        document.getElementById("cluster-name").focus();
+      }
+    } else if (managementTab === "ai") {
+      paintAiConfigPanel();
+      loadAiSettings();
+    } else if (managementTab === "ldap") {
+      paintLdapPanel();
+      loadLdapSettings();
+    }
   } else if (state.tab === "overview") {
-    view.innerHTML = `<div id="overview-cards" class="cards"></div><div class="split"><div class="panel"><h2>Attention</h2><div id="attention"></div></div><div class="panel"><h2>Pod metrics</h2><div id="metrics"></div></div></div>`;
+    view.innerHTML = `<div class="tab-tools">${refreshButton("Refresh overview")}</div><div id="overview-cards" class="cards"></div><div class="split"><div class="panel"><h2>Attention</h2><div id="attention"></div></div><div class="panel"><h2>Pod metrics</h2><div id="metrics"></div></div></div>`;
+    document.getElementById("metrics").addEventListener("click", onMetricsClick);
+    document.getElementById("attention").addEventListener("click", onAttentionClick);
   } else {
-    view.innerHTML = `<table><thead id="grid-head"></thead><tbody id="grid-body"></tbody></table>`;
+    view.innerHTML = `<div class="tab-tools">${refreshButton("Refresh " + tabs[state.tab].toLowerCase() + "s")}</div><div class="table-wrap"><table id="grid-table"><colgroup id="grid-cols"></colgroup><thead id="grid-head"></thead><tbody id="grid-body"></tbody></table></div><div id="grid-pagination"></div>`;
+    document.getElementById("grid-pagination").addEventListener("click", onGridPageClick);
+  }
+  const refreshBtn = document.getElementById("tab-refresh");
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", () => refresh());
+    refreshBtn.classList.toggle("spinning", state.refreshing);
+  }
+  const gridHead = document.getElementById("grid-head");
+  if (gridHead) {
+    gridHead.addEventListener("click", onGridHeaderClick);
+    gridHead.addEventListener("mousedown", onGridHeaderMouseDown);
+    gridHead.addEventListener("dblclick", onGridHeaderDoubleClick);
   }
   state.shellTab = state.tab;
   document.querySelectorAll("#tabs button").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === state.tab);
+  });
+  const gridTabs = ["pods", "deployments", "services", "configmaps", "nodes", "events"];
+  const hasStatusColumn = gridTabs.includes(state.tab) && columnsFor(state.tab).some((column) => column.label === "Status");
+  document.querySelectorAll(".pods-only").forEach((field) => {
+    field.classList.toggle("hidden", !hasStatusColumn);
   });
   syncCopyButtons();
 }
@@ -542,114 +817,509 @@ function captureLogs() {
   refresh();
 }
 
+let refreshBusy = false;
+let refreshQueued = false;
+
+// A live tick arrives every few seconds and queues a refresh. Fetching the
+// overview for several namespaces can take longer than that interval, so
+// without this guard a slow in-flight refresh and the next tick's refresh
+// would both land on the DOM out of order - the visible symptom is the
+// overview table flashing/re-rendering right after it loads. Queue at most
+// one follow-up refresh instead of running them concurrently.
 async function refresh() {
-  if (!state.clusterId && state.tab !== "management") {
-    document.getElementById("view").innerHTML = `<p>Add a kubeconfig from Management to begin. The demo cluster is included unless it was disabled.</p>`;
+  if (refreshBusy) {
+    refreshQueued = true;
     return;
   }
+  refreshBusy = true;
+  state.refreshing = true;
+  paintRefreshState();
   try {
-    if (state.shellTab !== state.tab) paintShell();
-    if (state.tab === "overview") await paintOverview();
-    else if (state.tab === "logs") await paintLogs();
-    else if (state.tab === "forwards") await paintForwards();
-    else if (state.tab === "assist") paintAssist();
-    else if (state.tab === "management") await paintManagement();
-    else await paintResources();
-    notice("");
-  } catch (error) {
-    if (error.status === 401) return showGate();
-    notice(error.message);
+    if (!state.clusterId && state.tab !== "management") {
+      document.getElementById("view").innerHTML = `<p>Add a kubeconfig from Management to begin. The demo cluster is included unless it was disabled.</p>`;
+      return;
+    }
+    try {
+      if (state.shellTab !== state.tab) paintShell();
+      if (state.tab === "overview") await paintOverview();
+      else if (state.tab === "logs") await paintLogs();
+      else if (state.tab === "forwards") await paintForwards();
+      else if (state.tab === "assist") paintAssist();
+      else if (state.tab === "management") await paintManagement();
+      else await paintResources();
+      notice("");
+    } catch (error) {
+      if (error.status === 401) goToLogin();
+      else notice(error.message);
+    }
+  } finally {
+    refreshBusy = false;
+    if (refreshQueued) {
+      refreshQueued = false;
+      refresh();
+    } else {
+      state.refreshing = false;
+      paintRefreshState();
+    }
   }
 }
 
+// Mirrors the shape of /api/overview so the panel still renders (all zeroed) when no
+// namespace is selected, instead of calling the API with a filter that would be read as "all".
+function emptyOverview() {
+  const cluster = state.clusters.find((item) => item.id === state.clusterId);
+  return {
+    clusterId: state.clusterId,
+    clusterName: cluster ? cluster.name : "",
+    demo: !!(cluster && cluster.demo),
+    version: "",
+    namespaces: 0,
+    pods: 0,
+    readyPods: 0,
+    deployments: 0,
+    services: 0,
+    configMaps: 0,
+    nodes: 0,
+    warnings: 0,
+    phases: [],
+    attention: [],
+    metrics: []
+  };
+}
+
 async function paintOverview() {
-  state.overview = await api("/api/overview?" + clusterQuery() + namespaceQuery());
+  state.overview = namespaceScopeEmpty() ? emptyOverview() : await api("/api/overview?" + clusterQuery() + namespaceQuery());
+  const cardsHost = document.getElementById("overview-cards");
+  const attentionHost = document.getElementById("attention");
+  const metricsHost = document.getElementById("metrics");
+  if (!cardsHost || !attentionHost || !metricsHost) return;
   const overview = state.overview;
   const cards = [
-    ["Namespaces", overview.namespaces],
-    ["Pods", overview.readyPods + "/" + overview.pods],
-    ["Deployments", overview.deployments],
-    ["Services", overview.services],
-    ["ConfigMaps", overview.configMaps],
-    ["Nodes", overview.nodes],
-    ["Warnings", overview.warnings],
-    ["Version", overview.version || "—"]
+    ["Namespaces", overview.namespaces, "Number of namespaces in the current view", null],
+    ["Pods ready/total", overview.readyPods + "/" + overview.pods, "Running pods out of total pods in the current view", null],
+    ["Deployments", overview.deployments, "Number of Deployments in the current view", null],
+    ["Services", overview.services, "Number of Services in the current view", null],
+    ["ConfigMaps", overview.configMaps, "Number of ConfigMaps in the current view", null],
+    ["Nodes", overview.nodes, "Number of Nodes in the cluster", null],
+    ["Warnings", overview.warnings, "Number of Warning events in the current view", null],
+    ["Version", overview.version || "—", "Kubernetes server version reported by the cluster", null]
   ];
-  document.getElementById("overview-cards").innerHTML = cards.map(([label, value]) =>
-    `<article class="card"><strong>${esc(value)}</strong><span>${esc(label)}</span></article>`
-  ).join("");
-  document.getElementById("attention").innerHTML = overview.attention.length
-    ? `<table><tbody>${overview.attention.map((item) => `<tr><td>${esc(item.namespace)}</td><td>${esc(item.kind)}</td><td>${esc(item.name)}</td><td>${chip(item.status)}</td><td>${esc(item.summary)}</td></tr>`).join("")}</tbody></table>`
-    : `<p class="muted">Nothing needs attention in this view.</p>`;
-  document.getElementById("metrics").innerHTML = overview.metrics.length
-    ? `<table><tbody>${overview.metrics.map((row) => `<tr><td>${esc(row.namespace)}/${esc(row.name)}</td><td>${esc(row.cpu)}</td><td>${esc(row.memory)}</td></tr>`).join("")}</tbody></table>`
-    : `<p class="muted">No metrics yet. metrics-server is optional on a live cluster.</p>`;
+  setHTML(cardsHost, cards.map(([label, value, tooltip, sub]) =>
+    `<article class="card" title="${esc(tooltip)}"><strong>${esc(value)}</strong><span>${esc(label)}</span>${sub ? `<small>${esc(sub)}</small>` : ""}</article>`
+  ).join(""));
+  renderAttention(attentionHost, overview.attention);
+  renderMetrics(metricsHost, overview.metrics);
   document.getElementById("counts").textContent = overview.clusterName + (overview.demo ? " · demo data" : "");
+}
+
+const GRID_PAGE_SIZE = 25;
+const METRICS_PAGE_SIZE = 10;
+const METRICS_COLUMNS = [
+  { key: "pod", label: "Pod", value: (row) => row.namespace + "/" + row.name },
+  { key: "cpu", label: "CPU", value: (row) => metricNumber(row.cpu) },
+  { key: "memory", label: "Memory", value: (row) => metricNumber(row.memory) }
+];
+
+// CPU/memory are always rendered as a single unit per column ("250m", "128Mi"),
+// so the leading number alone is enough to sort them correctly.
+function metricNumber(text) {
+  const match = String(text || "").match(/[\d.]+/);
+  return match ? parseFloat(match[0]) : 0;
+}
+
+function sortMetrics(rows, sort) {
+  const column = METRICS_COLUMNS.find((candidate) => candidate.key === sort.key);
+  if (!column) return rows;
+  const sorted = rows.slice().sort((a, b) => compareValues(column.value(a), column.value(b)));
+  return sort.dir === "desc" ? sorted.reverse() : sorted;
+}
+
+// Renders the Pod metrics panel sorted and paginated client-side so a namespace
+// with many pods stays scannable instead of one long unbroken table.
+function renderMetrics(host, rows) {
+  if (!rows.length) {
+    setHTML(host, `<p class="muted">No metrics yet. metrics-server is optional on a live cluster.</p>`);
+    return;
+  }
+  const sort = state.metricsSort;
+  const sorted = sortMetrics(rows, sort);
+  const pageCount = Math.max(1, Math.ceil(sorted.length / METRICS_PAGE_SIZE));
+  state.metricsPage = Math.min(Math.max(1, state.metricsPage), pageCount);
+  const start = (state.metricsPage - 1) * METRICS_PAGE_SIZE;
+  const page = sorted.slice(start, start + METRICS_PAGE_SIZE);
+  const head = METRICS_COLUMNS.map((column) => {
+    const active = sort.key === column.key;
+    const ariaSort = active ? (sort.dir === "desc" ? "descending" : "ascending") : "none";
+    const arrow = active ? `<span class="sort-arrow">${sort.dir === "desc" ? "▼" : "▲"}</span>` : "";
+    return `<th class="sortable" data-metrics-sort="${column.key}" aria-sort="${ariaSort}"><span class="th-label">${esc(column.label)}</span>${arrow}</th>`;
+  }).join("");
+  const body = page.map((row) => `<tr><td>${esc(row.namespace)}/${esc(row.name)}</td><td>${esc(row.cpu)}</td><td>${esc(row.memory)}</td></tr>`).join("");
+  const pagination = `<div class="pagination">
+    <button type="button" data-metrics-page="prev"${state.metricsPage <= 1 ? " disabled" : ""}>Prev</button>
+    <span class="muted">Page ${state.metricsPage} of ${pageCount} · ${sorted.length} pods</span>
+    <button type="button" data-metrics-page="next"${state.metricsPage >= pageCount ? " disabled" : ""}>Next</button>
+  </div>`;
+  setHTML(host, `<div class="panel-table-scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${pagination}`);
+}
+
+const ATTENTION_PAGE_SIZE = 10;
+const ATTENTION_COLUMNS = [
+  { key: "namespace", label: "Namespace", value: (row) => row.namespace },
+  { key: "kind", label: "Kind", value: (row) => row.kind },
+  { key: "name", label: "Name", value: (row) => row.name },
+  { key: "status", label: "Status", value: (row) => row.status },
+  { key: "summary", label: "Summary", value: (row) => row.summary }
+];
+
+function sortAttention(rows, sort) {
+  const column = ATTENTION_COLUMNS.find((candidate) => candidate.key === sort.key);
+  if (!column) return rows;
+  const sorted = rows.slice().sort((a, b) => compareValues(column.value(a), column.value(b)));
+  return sort.dir === "desc" ? sorted.reverse() : sorted;
+}
+
+// Renders the Attention panel sorted and paginated client-side, same as the
+// Pod metrics panel, so a namespace (or cluster) with many warnings stays
+// scannable instead of one long unbroken table.
+function renderAttention(host, rows) {
+  if (!rows.length) {
+    setHTML(host, `<p class="muted">Nothing needs attention in this view.</p>`);
+    return;
+  }
+  const sort = state.attentionSort;
+  const sorted = sortAttention(rows, sort);
+  const pageCount = Math.max(1, Math.ceil(sorted.length / ATTENTION_PAGE_SIZE));
+  state.attentionPage = Math.min(Math.max(1, state.attentionPage), pageCount);
+  const start = (state.attentionPage - 1) * ATTENTION_PAGE_SIZE;
+  const page = sorted.slice(start, start + ATTENTION_PAGE_SIZE);
+  const head = ATTENTION_COLUMNS.map((column) => {
+    const active = sort.key === column.key;
+    const ariaSort = active ? (sort.dir === "desc" ? "descending" : "ascending") : "none";
+    const arrow = active ? `<span class="sort-arrow">${sort.dir === "desc" ? "▼" : "▲"}</span>` : "";
+    return `<th class="sortable" data-attention-sort="${column.key}" aria-sort="${ariaSort}"><span class="th-label">${esc(column.label)}</span>${arrow}</th>`;
+  }).join("");
+  const body = page.map((item) => `<tr><td>${esc(item.namespace)}</td><td>${esc(item.kind)}</td><td>${esc(item.name)}</td><td>${chip(item.status)}</td><td>${esc(item.summary)}</td></tr>`).join("");
+  const pagination = `<div class="pagination">
+    <button type="button" data-attention-page="prev"${state.attentionPage <= 1 ? " disabled" : ""}>Prev</button>
+    <span class="muted">Page ${state.attentionPage} of ${pageCount} · ${sorted.length} items</span>
+    <button type="button" data-attention-page="next"${state.attentionPage >= pageCount ? " disabled" : ""}>Next</button>
+  </div>`;
+  setHTML(host, `<div class="panel-table-scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${pagination}`);
+}
+
+// Delegated on the persistent #attention container (it's rebuilt via setHTML
+// on every refresh), so header-sort and pagination clicks keep working
+// without re-binding listeners each render.
+function onAttentionClick(event) {
+  const sortHeader = event.target.closest("[data-attention-sort]");
+  if (sortHeader) {
+    const key = sortHeader.dataset.attentionSort;
+    const current = state.attentionSort;
+    state.attentionSort = { key, dir: current.key === key && current.dir === "asc" ? "desc" : "asc" };
+    state.attentionPage = 1;
+    renderAttention(event.currentTarget, state.overview ? state.overview.attention : []);
+    return;
+  }
+  const pageButton = event.target.closest("[data-attention-page]");
+  if (pageButton && !pageButton.disabled) {
+    state.attentionPage += pageButton.dataset.attentionPage === "next" ? 1 : -1;
+    renderAttention(event.currentTarget, state.overview ? state.overview.attention : []);
+  }
+}
+
+// Delegated on the persistent #metrics container (it's rebuilt via setHTML on
+// every refresh), so header-sort and pagination clicks keep working without
+// re-binding listeners each render.
+function onMetricsClick(event) {
+  const sortHeader = event.target.closest("[data-metrics-sort]");
+  if (sortHeader) {
+    const key = sortHeader.dataset.metricsSort;
+    const current = state.metricsSort;
+    state.metricsSort = { key, dir: current.key === key && current.dir === "asc" ? "desc" : "asc" };
+    state.metricsPage = 1;
+    renderMetrics(event.currentTarget, state.overview ? state.overview.metrics : []);
+    return;
+  }
+  const pageButton = event.target.closest("[data-metrics-page]");
+  if (pageButton && !pageButton.disabled) {
+    state.metricsPage += pageButton.dataset.metricsPage === "next" ? 1 : -1;
+    renderMetrics(event.currentTarget, state.overview ? state.overview.metrics : []);
+  }
 }
 
 async function paintResources() {
   const kind = tabs[state.tab];
-  state.resources = await api("/api/resources?" + clusterQuery() + "&kind=" + encodeURIComponent(kind) + namespaceQuery() + filterQuery());
+  state.resources = namespaceScopeEmpty()
+    ? []
+    : await api("/api/resources?" + clusterQuery() + "&kind=" + encodeURIComponent(kind) + namespaceQuery() + filterQuery());
+  renderGrid();
+}
+
+// Re-draws the resource grid from already-fetched state.resources - used both
+// after a fetch and after a client-side-only change (sort, column resize) so
+// those don't need to round-trip to the server.
+function renderGrid() {
+  const gridHead = document.getElementById("grid-head");
+  const gridBody = document.getElementById("grid-body");
+  const gridCols = document.getElementById("grid-cols");
+  const gridTable = document.getElementById("grid-table");
+  if (!gridHead || !gridBody || !gridCols || !gridTable) return;
   const columns = columnsFor(state.tab);
-  document.getElementById("grid-head").innerHTML = `<tr>${columns.map((column) => `<th>${esc(column.label)}</th>`).join("")}</tr>`;
-  const groups = new Map();
-  state.resources.forEach((resource) => {
+  const widths = state.columnWidths[state.tab] || {};
+  const fixed = Object.keys(widths).length > 0;
+  gridTable.classList.toggle("fixed-cols", fixed);
+  setHTML(gridCols, columns.map((column) =>
+    `<col${widths[column.label] ? ` style="width:${widths[column.label]}px"` : ""}>`
+  ).join(""));
+  const sort = state.sort[state.tab];
+  setHTML(gridHead, `<tr>${columns.map((column) => {
+    const active = sort && sort.label === column.label;
+    const ariaSort = active ? (sort.dir === "desc" ? "descending" : "ascending") : "none";
+    const arrow = active ? `<span class="sort-arrow">${sort.dir === "desc" ? "▼" : "▲"}</span>` : "";
+    return `<th class="sortable" data-label="${esc(column.label)}" aria-sort="${ariaSort}"${column.title ? ` title="${esc(column.title)}"` : ""}><span class="th-label">${esc(column.label)}</span>${arrow}<span class="col-resizer" title="Drag to resize, double-click to fit"></span></th>`;
+  }).join("")}</tr>`);
+  const resources = sort ? sortResources(state.resources, columns, sort) : state.resources;
+  // Grouping by namespace only reads naturally when the rows are still in
+  // server order - once a column sort is active, show one flat sorted list.
+  const allGroups = new Map();
+  resources.forEach((resource) => {
     const key = resource.namespace || "cluster";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(resource);
+    if (!allGroups.has(key)) allGroups.set(key, []);
+    allGroups.get(key).push(resource);
   });
-  const multiple = groups.size > 1;
-  let html = "";
-  groups.forEach((resources, namespace) => {
-    if (multiple) {
-      html += `<tr class="group"><td colspan="${columns.length}">${esc(namespace)} · ${resources.length}</td></tr>`;
+  const multiple = !sort && allGroups.size > 1;
+  const collapsed = state.collapsedGroups[state.tab] || (state.collapsedGroups[state.tab] = new Set());
+  // Paginated client-side, same as the overview's pod metrics table, so a namespace (or
+  // cluster) with hundreds of resources stays scannable instead of one long unbroken table.
+  // Groups are allowed to span pages - a namespace bigger than a page just continues onto
+  // the next one (flagged below so its header can read "(continued)") - rather than being
+  // kept atomic. Keeping a group atomic meant expanding a collapsed namespace could grow it
+  // past the room left on the page it was sitting on, bumping it (and the user) onto a
+  // different page than the one they were just looking at.
+  let pages;
+  if (multiple) {
+    pages = [];
+    let current = [];
+    let currentCount = 0;
+    const pushPage = () => {
+      if (current.length) pages.push(current);
+      current = [];
+      currentCount = 0;
+    };
+    allGroups.forEach((groupResources, namespace) => {
+      if (collapsed.has(namespace)) {
+        if (currentCount >= GRID_PAGE_SIZE) pushPage();
+        current.push([namespace, groupResources, false]);
+        currentCount += 1;
+        return;
+      }
+      let remaining = groupResources;
+      let continuation = false;
+      do {
+        if (currentCount >= GRID_PAGE_SIZE) pushPage();
+        const chunk = remaining.slice(0, GRID_PAGE_SIZE - currentCount);
+        remaining = remaining.slice(chunk.length);
+        current.push([namespace, chunk, continuation]);
+        currentCount += chunk.length;
+        continuation = true;
+      } while (remaining.length);
+    });
+    pushPage();
+  } else {
+    pages = [];
+    for (let start = 0; start < resources.length; start += GRID_PAGE_SIZE) {
+      pages.push([["", resources.slice(start, start + GRID_PAGE_SIZE)]]);
     }
-    resources.forEach((resource) => {
+  }
+  if (!pages.length) pages = [[]];
+  const pageCount = pages.length;
+  const gridPage = Math.min(Math.max(1, state.gridPage[state.tab] || 1), pageCount);
+  state.gridPage[state.tab] = gridPage;
+  const pageGroups = pages[gridPage - 1];
+  let html = "";
+  pageGroups.forEach(([namespace, groupResources, continuation]) => {
+    if (multiple) {
+      const isCollapsed = collapsed.has(namespace);
+      const total = allGroups.get(namespace).length;
+      html += `<tr class="group clickable" data-group="${esc(namespace)}" aria-expanded="${isCollapsed ? "false" : "true"}"><td colspan="${columns.length}"><span class="group-arrow">${isCollapsed ? "▶" : "▼"}</span>${esc(namespace)}${continuation ? " (continued)" : ""} · ${total}</td></tr>`;
+      if (isCollapsed) return;
+    }
+    groupResources.forEach((resource) => {
       const selected = state.selection && state.selection.kind === resource.kind && state.selection.name === resource.name && state.selection.namespace === resource.namespace;
       html += `<tr class="clickable ${selected ? "selected" : ""}" data-kind="${esc(resource.kind)}" data-namespace="${esc(resource.namespace)}" data-name="${esc(resource.name)}">`;
-      columns.forEach((column) => { html += `<td>${column.cell(resource)}</td>`; });
+      columns.forEach((column) => { html += `<td${column.wrap ? ' class="wrap"' : ""}>${column.cell(resource)}</td>`; });
       html += "</tr>";
     });
   });
-  document.getElementById("grid-body").innerHTML = html || `<tr><td>No resources match.</td></tr>`;
-  document.querySelectorAll("#grid-body tr.clickable").forEach((row) => {
-    row.addEventListener("click", (event) => {
-      if (event.target.closest(".copy-icon")) return;
-      openDetail(row.dataset.kind, row.dataset.namespace, row.dataset.name);
+  if (setHTML(gridBody, html || `<tr><td>No resources match.</td></tr>`)) {
+    gridBody.querySelectorAll("tr.group").forEach((row) => {
+      row.addEventListener("click", () => {
+        const namespace = row.dataset.group;
+        if (collapsed.has(namespace)) collapsed.delete(namespace);
+        else collapsed.add(namespace);
+        renderGrid();
+      });
     });
-  });
-  document.getElementById("counts").textContent = state.resources.length + " " + state.tab + " in " + state.selectedNamespaces.size + " namespaces";
+    gridBody.querySelectorAll("tr.clickable[data-kind]").forEach((row) => {
+      row.addEventListener("click", (event) => {
+        if (event.target.closest(".copy-icon")) return;
+        openDetail(row.dataset.kind, row.dataset.namespace, row.dataset.name);
+      });
+    });
+  }
+  const pagination = document.getElementById("grid-pagination");
+  if (pagination) {
+    setHTML(pagination, resources.length > GRID_PAGE_SIZE ? `<div class="pagination">
+      <button type="button" data-grid-page="prev"${gridPage <= 1 ? " disabled" : ""}>Prev</button>
+      <span class="muted">Page ${gridPage} of ${pageCount} · ${resources.length} ${state.tab}</span>
+      <button type="button" data-grid-page="next"${gridPage >= pageCount ? " disabled" : ""}>Next</button>
+    </div>` : "");
+  }
+  document.getElementById("counts").textContent = state.resources.length + " " + state.tab + " in " + namespaceSummary();
+}
+
+// Delegated on the persistent #grid-pagination container (it's rebuilt via
+// setHTML on every render) so Prev/Next keep working without re-binding.
+function onGridPageClick(event) {
+  const pageButton = event.target.closest("[data-grid-page]");
+  if (!pageButton || pageButton.disabled) return;
+  state.gridPage[state.tab] = (state.gridPage[state.tab] || 1) + (pageButton.dataset.gridPage === "next" ? 1 : -1);
+  renderGrid();
+}
+
+function compareValues(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  return String(a ?? "").localeCompare(String(b ?? ""), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function sortResources(resources, columns, sort) {
+  const column = columns.find((candidate) => candidate.label === sort.label);
+  if (!column || !column.value) return resources;
+  const sorted = resources.slice().sort((a, b) => compareValues(column.value(a), column.value(b)));
+  return sort.dir === "desc" ? sorted.reverse() : sorted;
+}
+
+// Clicking a header toggles that column's sort direction (asc -> desc -> asc);
+// clicking a different column starts a fresh ascending sort on it.
+function onGridHeaderClick(event) {
+  if (event.target.closest(".col-resizer")) return;
+  const th = event.target.closest("th");
+  if (!th) return;
+  const label = th.dataset.label;
+  const current = state.sort[state.tab];
+  state.sort[state.tab] = { label, dir: current && current.label === label && current.dir === "asc" ? "desc" : "asc" };
+  state.gridPage[state.tab] = 1;
+  renderGrid();
+}
+
+let activeResize = null;
+
+// Dragging a column's resize handle. Auto layout (the default) sizes every
+// column to its widest cell and won't shrink below that, so the first drag on
+// a table snapshots every column's current width and switches the table to a
+// fixed layout driven by <colgroup>, which is the layout mode that actually
+// honors a manually chosen width.
+function onGridHeaderMouseDown(event) {
+  const handle = event.target.closest(".col-resizer");
+  if (!handle) return;
+  const th = handle.closest("th");
+  const headerRow = th.parentElement;
+  const index = Array.prototype.indexOf.call(headerRow.children, th);
+  event.preventDefault();
+  const tab = state.tab;
+  const widths = state.columnWidths[tab] || (state.columnWidths[tab] = {});
+  if (Object.keys(widths).length === 0) {
+    const columns = columnsFor(tab);
+    Array.from(headerRow.children).forEach((cell, i) => {
+      widths[columns[i].label] = Math.round(cell.getBoundingClientRect().width);
+    });
+    renderGrid();
+  }
+  const label = th.dataset.label;
+  const col = document.getElementById("grid-cols").children[index];
+  if (!col) return;
+  activeResize = { tab, label, col, startX: event.clientX, startWidth: widths[label] || col.getBoundingClientRect().width };
+  document.body.classList.add("col-resizing");
+}
+
+document.addEventListener("mousemove", (event) => {
+  if (!activeResize) return;
+  const width = Math.max(60, Math.round(activeResize.startWidth + (event.clientX - activeResize.startX)));
+  activeResize.col.style.width = width + "px";
+});
+
+document.addEventListener("mouseup", () => {
+  if (!activeResize) return;
+  const width = parseInt(activeResize.col.style.width, 10) || activeResize.startWidth;
+  state.columnWidths[activeResize.tab][activeResize.label] = width;
+  saveColumnWidths();
+  document.body.classList.remove("col-resizing");
+  activeResize = null;
+});
+
+// Double-clicking a resize handle fits that column to its widest current
+// cell (scrollWidth still reflects the full content even when the column is
+// currently clipped by text-overflow: ellipsis).
+function onGridHeaderDoubleClick(event) {
+  const handle = event.target.closest(".col-resizer");
+  if (!handle) return;
+  const th = handle.closest("th");
+  const headerRow = th.parentElement;
+  const cells = Array.from(headerRow.children);
+  const index = cells.indexOf(th);
+  const tab = state.tab;
+  const columns = columnsFor(tab);
+  const widths = state.columnWidths[tab] || (state.columnWidths[tab] = {});
+  if (Object.keys(widths).length === 0) {
+    cells.forEach((cell, i) => { widths[columns[i].label] = Math.round(cell.getBoundingClientRect().width); });
+  }
+  const table = document.getElementById("grid-table");
+  const bodyCells = table.querySelectorAll(`tbody tr:not(.group) > *:nth-child(${index + 1})`);
+  let max = th.querySelector(".th-label").scrollWidth;
+  bodyCells.forEach((cell) => { max = Math.max(max, cell.scrollWidth); });
+  widths[columns[index].label] = Math.max(60, max + 24);
+  saveColumnWidths();
+  renderGrid();
 }
 
 function columnsFor(tab) {
-  const name = { label: "Name", cell: (resource) => esc(resource.name) };
-  const namespace = { label: "Namespace", cell: (resource) => esc(resource.namespace || "—") };
-  const status = { label: "Status", cell: (resource) => chip(resource.status) };
-  const ready = { label: "Ready", cell: (resource) => resource.desired ? esc(resource.ready + "/" + resource.desired) : "" };
-  const node = { label: "Node", cell: (resource) => esc(resource.node) };
-  const images = { label: "Images", cell: (resource) => esc((resource.images || []).join(", ")) };
-  const created = { label: "Age", cell: (resource) => esc(age(resource.created)) };
-  const summary = { label: "Summary", cell: (resource) => esc(resource.summary) };
-  const attr = (label, key) => ({ label, cell: (resource) => esc((resource.attributes || {})[key] || "") });
+  const name = { label: "Name", value: (resource) => resource.name || "", cell: (resource) => esc(resource.name) };
+  const namespace = { label: "Namespace", value: (resource) => resource.namespace || "", cell: (resource) => esc(resource.namespace || "—") };
+  const status = { label: "Status", value: (resource) => resource.status || "", cell: (resource) => chip(resource.status) };
+  const ready = { label: "Ready", value: (resource) => resource.desired ? Number(resource.ready) || 0 : -1, cell: (resource) => resource.desired ? esc(resource.ready + "/" + resource.desired) : "" };
+  const node = { label: "Node", value: (resource) => resource.node || "", cell: (resource) => esc(resource.node) };
+  const images = { label: "Images", wrap: true, value: (resource) => (resource.images || []).join(", "), cell: (resource) => esc((resource.images || []).join(", ")) };
+  const created = { label: "Age", value: (resource) => Date.parse(resource.created) || 0, cell: (resource) => esc(age(resource.created)) };
+  const summary = { label: "Summary", wrap: true, value: (resource) => resource.summary || "", cell: (resource) => esc(resource.summary) };
+  const attr = (label, key, wrap, title) => ({ label, wrap, title, value: (resource) => (resource.attributes || {})[key] || "", cell: (resource) => esc((resource.attributes || {})[key] || "") });
   if (tab === "pods") return [name, namespace, status, ready, node, images, created];
   if (tab === "deployments") return [name, namespace, status, ready, images, created];
   if (tab === "services") return [name, namespace, attr("Type", "type"), attr("Cluster IP", "clusterIP"), attr("Ports", "ports")];
   if (tab === "configmaps") {
-    const configName = { label: "Name", cell: (resource) => `<span class="copy-line">${esc(resource.name)} ${configMapCopyButton(resource)}</span>` };
-    return [configName, namespace, attr("Keys", "keys"), created];
+    const configName = { label: "Name", value: (resource) => resource.name || "", cell: (resource) => `<span class="copy-line">${esc(resource.name)} ${configMapCopyButton(resource)}</span>` };
+    return [configName, namespace, attr("Keys", "keys", true), created];
   }
-  if (tab === "nodes") return [name, status, attr("Roles", "roles"), attr("CPU", "cpu"), attr("Memory", "memory")];
+  if (tab === "nodes") return [
+    name,
+    status,
+    attr("Roles", "roles"),
+    attr("CPU (used/allocatable)", "cpu", false, "Current CPU usage reported by metrics-server over the node's allocatable CPU capacity"),
+    attr("Memory (used/allocatable)", "memory", false, "Current memory usage reported by metrics-server over the node's allocatable memory capacity")
+  ];
   return [namespace, name, status, attr("Reason", "reason"), summary];
 }
 
 async function paintLogs() {
   const logs = state.logs;
-  let path = "/api/logs?" + clusterQuery() + namespaceQuery() + "&tail=" + encodeURIComponent(logs.tail);
-  if (logs.deployment) path += "&deployment=" + encodeURIComponent(logs.deployment);
-  if (logs.pod) path += "&pod=" + encodeURIComponent(logs.pod);
-  if (logs.container) path += "&container=" + encodeURIComponent(logs.container);
-  if (logs.q) path += "&q=" + encodeURIComponent(logs.q);
-  const page = await api(path);
+  let page = { lines: [], truncated: false };
+  if (!namespaceScopeEmpty()) {
+    let path = "/api/logs?" + clusterQuery() + namespaceQuery() + "&tail=" + encodeURIComponent(logs.tail);
+    if (logs.deployment) path += "&deployment=" + encodeURIComponent(logs.deployment);
+    if (logs.pod) path += "&pod=" + encodeURIComponent(logs.pod);
+    if (logs.container) path += "&container=" + encodeURIComponent(logs.container);
+    if (logs.q) path += "&q=" + encodeURIComponent(logs.q);
+    page = await api(path);
+  }
   const output = document.getElementById("log-output");
   if (!output) return;
   output.dataset.empty = page.lines.length ? "false" : "true";
@@ -661,10 +1331,13 @@ async function paintLogs() {
 }
 
 async function paintForwards() {
-  state.forwards = await api("/api/port-forwards?" + clusterQuery());
+  const all = await api("/api/port-forwards?" + clusterQuery());
+  // The API lists every open forward for the cluster regardless of namespace, so apply the
+  // namespace selection client-side to keep this tab consistent with the rest of the dashboard.
+  state.forwards = namespaceScopeEmpty() ? [] : all.filter((forward) => state.selectedNamespaces.has(forward.namespace));
   const host = document.getElementById("forward-list");
   if (!host) return;
-  host.innerHTML = state.forwards.length ? state.forwards.map((forward) => `
+  const html = state.forwards.length ? state.forwards.map((forward) => `
     <div class="forward-row">
       <div>
         <strong>${esc(forward.namespace)}/${esc(forward.targetKind)}/${esc(forward.targetName)}</strong>
@@ -674,12 +1347,14 @@ async function paintForwards() {
       <button type="button" data-id="${esc(forward.id)}">Stop</button>
     </div>
   `).join("") : `<p class="muted">No forwards are open. A service forward uses the first ready pod that matches the selector.</p>`;
-  host.querySelectorAll("button").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await api("/api/port-forwards/" + encodeURIComponent(button.dataset.id), { method: "DELETE" });
-      refresh();
+  if (setHTML(host, html)) {
+    host.querySelectorAll("button").forEach((button) => {
+      button.addEventListener("click", async () => {
+        await api("/api/port-forwards/" + encodeURIComponent(button.dataset.id), { method: "DELETE" });
+        refresh();
+      });
     });
-  });
+  }
 }
 
 async function openForward(event) {
@@ -702,6 +1377,12 @@ async function openForward(event) {
   }
 }
 
+// Mirrors the AI assist panel's inputs into state.ai as the user types, so
+// Ask (on the Assist tab, where these inputs don't exist in the DOM) always
+// sends whatever is currently on screen even before it's saved. A no-op
+// when the panel isn't mounted. Actually persisting the configuration -
+// writing it, API key encrypted, under the server's data directory - only
+// happens on saveAiSettings(), via the panel's Save button.
 function saveAiChoice() {
   const provider = document.getElementById("ai-provider");
   const baseUrl = document.getElementById("ai-base-url");
@@ -714,13 +1395,8 @@ function saveAiChoice() {
   state.ai.model = model.value.trim();
   state.ai.apiKey = key.value;
   state.ai.orgId = org.value.trim();
-  storageSet(localStorage, AI_KEYS.name, state.ai.providerName);
-  storageSet(localStorage, AI_KEYS.baseUrl, state.ai.baseUrl);
-  storageSet(localStorage, AI_KEYS.model, state.ai.model);
-  storageSet(localStorage, AI_KEYS.apiKey, state.ai.apiKey);
-  storageSet(localStorage, AI_KEYS.org, state.ai.orgId);
   toggleAiFields();
-  paintAssist();
+  updateAiStatus();
 }
 
 function usingDevin() {
@@ -750,25 +1426,132 @@ function toggleAiFields() {
   if (org) org.required = devin;
 }
 
-function paintAssist() {
+function updateAiStatus() {
   const statusHost = document.getElementById("ai-status");
-  if (statusHost) {
-    if (!state.ai.providerName && !state.ai.baseUrl && !state.ai.apiKey) {
-      statusHost.textContent = "Assist is off. Enter a provider name, base URL, and API key. They stay in this browser.";
-    } else if (!state.ai.baseUrl) {
-      statusHost.textContent = "Base URL is required. The provider name, base URL, and API key stay in this browser.";
-    } else {
-      let host = "";
-      try {
-        host = new URL(state.ai.baseUrl).host;
-      } catch (error) {
-        host = "";
-      }
-      const name = state.ai.providerName || "Custom";
-      const model = state.ai.model || "server model";
-      statusHost.textContent = name + " · " + model + (host ? " · " + host : "") + ". Saved in this browser.";
+  if (!statusHost) return;
+  if (!state.ai.loaded) {
+    statusHost.textContent = "Loading…";
+  } else if (!state.ai.providerName && !state.ai.baseUrl && !state.ai.hasApiKey && !state.ai.apiKey) {
+    statusHost.textContent = "Assist is off. Enter a provider name, base URL, and API key, then Save.";
+  } else if (!state.ai.baseUrl) {
+    statusHost.textContent = "Base URL is required.";
+  } else {
+    let host = "";
+    try {
+      host = new URL(state.ai.baseUrl).host;
+    } catch (error) {
+      host = "";
     }
+    const name = state.ai.providerName || "Custom";
+    const model = state.ai.model || "server model";
+    statusHost.textContent = name + " · " + model + (host ? " · " + host : "") + ". Saved on the server.";
   }
+}
+
+function renderAiConfigPanel() {
+  const ai = state.ai;
+  return `
+    <h2>AI assist</h2>
+    <p class="muted">Defaults come from the server's application.yml / environment variables. Saving here writes an override - the API key encrypted - under the server's data directory (~/.k8s-dashboard by default), so every browser you open the dashboard in picks it up.</p>
+    <p id="ai-status" class="muted"></p>
+    <label>Provider name <input id="ai-provider" autocomplete="off" maxlength="80" placeholder="Grok" value="${esc(ai.providerName)}"></label>
+    <label>Base URL <input id="ai-base-url" autocomplete="off" maxlength="500" placeholder="https://api.x.ai/v1" value="${esc(ai.baseUrl)}"></label>
+    <label>Model <input id="ai-model" autocomplete="off" maxlength="120" placeholder="grok-4.7" value="${esc(ai.model)}"></label>
+    <label>API key <span class="muted">${ai.hasApiKey ? "(a key is set)" : "(none set)"}</span>
+      <div class="secret">
+        <input id="ai-key" type="password" autocomplete="new-password" maxlength="512" placeholder="${ai.hasApiKey ? "Leave blank to keep the current key" : ""}" value="${esc(ai.apiKey)}">
+        <button type="button" id="ai-key-toggle" aria-label="Show API key" aria-pressed="false">
+          <svg class="eye-on" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></svg>
+          <svg class="eye-off" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.5 6.2A10.6 10.6 0 0 1 12 6c6.5 0 10 6 10 6a18 18 0 0 1-3.1 3.7"/><path d="M6.2 6.8C3.9 8.4 2 12 2 12s3.5 6 10 6c1.1 0 2.2-.2 3.2-.6"/><path d="M9.9 9.9a2.5 2.5 0 0 0 3.6 3.6"/></svg>
+        </button>
+      </div>
+    </label>
+    <label class="inline"><input id="ai-clear-key" type="checkbox" ${ai.clearApiKey ? "checked" : ""} ${ai.hasApiKey ? "" : "disabled"}> Clear the stored API key</label>
+    <label id="ai-org-field" class="${usingDevin() ? "" : "hidden"}">Devin organization id <input id="ai-org" autocomplete="off" placeholder="org-..." value="${esc(ai.orgId)}">
+      <span class="muted">From Settings, then Devin API.</span>
+    </label>
+    <div class="actions">
+      <button class="primary" id="ai-save" type="button" ${ai.saving ? "disabled" : ""}>${ai.saving ? "Saving…" : "Save"}</button>
+    </div>
+    <p id="ai-message" class="muted">${esc(ai.message)}</p>`;
+}
+
+function wireAiConfigPanel() {
+  document.getElementById("ai-provider").addEventListener("input", saveAiChoice);
+  document.getElementById("ai-base-url").addEventListener("input", saveAiChoice);
+  document.getElementById("ai-model").addEventListener("input", saveAiChoice);
+  document.getElementById("ai-key").addEventListener("input", saveAiChoice);
+  document.getElementById("ai-key-toggle").addEventListener("click", toggleApiKey);
+  document.getElementById("ai-org").addEventListener("input", saveAiChoice);
+  const clearInput = document.getElementById("ai-clear-key");
+  if (clearInput) {
+    clearInput.addEventListener("change", (event) => {
+      state.ai.clearApiKey = event.target.checked;
+    });
+  }
+  const saveButton = document.getElementById("ai-save");
+  if (saveButton) saveButton.addEventListener("click", saveAiSettings);
+}
+
+function paintAiConfigPanel() {
+  const host = document.getElementById("ai-config-panel");
+  if (!host) return;
+  if (setHTML(host, renderAiConfigPanel())) {
+    wireAiConfigPanel();
+  }
+  updateAiStatus();
+  toggleAiFields();
+}
+
+async function loadAiSettings() {
+  try {
+    const settings = await api("/api/management/ai");
+    Object.assign(state.ai, settings, {
+      loaded: true,
+      saving: false,
+      apiKey: "",
+      clearApiKey: false,
+      message: ""
+    });
+  } catch (error) {
+    state.ai.loaded = true;
+    state.ai.message = error.message;
+  }
+  paintAiConfigPanel();
+}
+
+async function saveAiSettings() {
+  saveAiChoice();
+  const ai = state.ai;
+  ai.saving = true;
+  ai.message = "";
+  paintAiConfigPanel();
+  try {
+    const settings = await api("/api/management/ai", {
+      method: "POST",
+      body: JSON.stringify({
+        providerName: ai.providerName,
+        baseUrl: ai.baseUrl,
+        model: ai.model,
+        apiKey: ai.apiKey,
+        orgId: ai.orgId,
+        clearApiKey: ai.clearApiKey
+      })
+    });
+    Object.assign(state.ai, settings, {
+      saving: false,
+      apiKey: "",
+      clearApiKey: false,
+      message: "Saved."
+    });
+  } catch (error) {
+    ai.saving = false;
+    ai.message = error.message;
+  }
+  paintAiConfigPanel();
+}
+
+function paintAssist() {
   showAnswer();
   const copy = document.getElementById("ai-copy");
   if (copy) copy.disabled = state.ai.busy || !state.ai.answer;
@@ -942,34 +1725,6 @@ async function act(work) {
   }
 }
 
-function showModal(html) {
-  const modal = document.getElementById("modal");
-  modal.innerHTML = `<div class="dialog">${html}</div>`;
-  modal.classList.remove("hidden");
-  modal.addEventListener("click", (event) => {
-    if (event.target === modal) modal.classList.add("hidden");
-  }, { once: true });
-}
-
-function openApply() {
-  showModal(`
-    <h2>Apply manifest</h2>
-    <p class="muted">Sent to the selected cluster. The demo cluster accepts ConfigMap, Deployment, Service, and Pod.</p>
-    <textarea id="manifest" placeholder="apiVersion: v1"></textarea>
-    <div class="actions"><button class="primary" id="manifest-apply" type="button">Apply</button><button type="button" id="modal-close">Close</button></div>`);
-  document.getElementById("modal-close").addEventListener("click", closeModal);
-  document.getElementById("manifest-apply").addEventListener("click", async () => {
-    try {
-      await api("/api/apply?" + clusterQuery(), { method: "POST", body: JSON.stringify({ yaml: document.getElementById("manifest").value }) });
-      closeModal();
-      await loadNamespaces(false);
-      refresh();
-    } catch (error) {
-      notice(error.message);
-    }
-  });
-}
-
 function managedWhere(resource) {
   return resource.namespace ? resource.namespace + "/" + resource.name : resource.name;
 }
@@ -1061,32 +1816,50 @@ async function deleteManagedResource(kind, namespace, name) {
   }
 }
 
+// The Management tab's Resources, Namespaces, and Clusters sub-tabs each
+// show only their own panel, so each paints independently and bails out
+// immediately when its elements aren't the one currently on screen.
 async function paintManagement() {
-  const clusterHost = document.getElementById("manage-cluster");
-  const namespaceHost = document.getElementById("namespace-rows");
-  const clusterRows = document.getElementById("cluster-rows");
+  await paintManagedResources();
+  await paintManagedNamespaces();
+  await paintManagedClusters();
+}
+
+async function paintManagedResources() {
   const resourceHost = document.getElementById("manage-resources");
-  if (!namespaceHost || !clusterRows || !resourceHost) return;
+  if (!resourceHost) return;
   const kindSelect = document.getElementById("manage-kind");
   if (kindSelect) kindSelect.disabled = !state.clusterId;
   let resources = [];
-  if (state.clusterId) {
+  if (state.clusterId && !namespaceScopeEmpty()) {
     resources = await api("/api/resources?kind=" + encodeURIComponent(state.management.kind || "deployments") + "&" + clusterQuery() + namespaceQuery());
   }
-  resourceHost.innerHTML = resources.length ? resources.map((resource) => `
+  if (setHTML(resourceHost, resources.length ? resources.map((resource) => `
     <div class="cluster-row">
       <div><strong>${esc(managedWhere(resource))}</strong><div class="muted">${chip(resource.status)} ${esc(resource.summary)}</div></div>
       <div class="inline">
         <button type="button" data-edit-kind="${esc(resource.kind)}" data-edit-namespace="${esc(resource.namespace)}" data-edit-name="${esc(resource.name)}">Edit</button>
         <button type="button" class="danger" data-remove-kind="${esc(resource.kind)}" data-remove-namespace="${esc(resource.namespace)}" data-remove-name="${esc(resource.name)}">Delete</button>
       </div>
-    </div>`).join("") : `<p class="muted">${state.clusterId ? "No resources in the selected namespaces." : "Add a cluster before editing resources."}</p>`;
-  resourceHost.querySelectorAll("[data-edit-kind]").forEach((button) => {
-    button.addEventListener("click", () => editManagedResource(button.dataset.editKind, button.dataset.editNamespace, button.dataset.editName));
-  });
-  resourceHost.querySelectorAll("[data-remove-kind]").forEach((button) => {
-    button.addEventListener("click", () => deleteManagedResource(button.dataset.removeKind, button.dataset.removeNamespace, button.dataset.removeName));
-  });
+    </div>`).join("") : `<p class="muted">${state.clusterId ? "No resources in the selected namespaces." : "Add a cluster before editing resources."}</p>`)) {
+    resourceHost.querySelectorAll("[data-edit-kind]").forEach((button) => {
+      button.addEventListener("click", () => editManagedResource(button.dataset.editKind, button.dataset.editNamespace, button.dataset.editName));
+    });
+    resourceHost.querySelectorAll("[data-remove-kind]").forEach((button) => {
+      button.addEventListener("click", () => deleteManagedResource(button.dataset.removeKind, button.dataset.removeNamespace, button.dataset.removeName));
+    });
+  }
+  const selected = state.clusters.find((cluster) => cluster.id === state.clusterId);
+  const kindLabel = (MANAGE_KINDS.find(([value]) => value === state.management.kind) || MANAGE_KINDS[0])[1];
+  document.getElementById("counts").textContent = selected
+    ? selected.name + " · " + resources.length + " " + kindLabel.toLowerCase()
+    : "No cluster selected";
+}
+
+async function paintManagedNamespaces() {
+  const namespaceHost = document.getElementById("namespace-rows");
+  if (!namespaceHost) return;
+  const clusterHost = document.getElementById("manage-cluster");
   const selected = state.clusters.find((cluster) => cluster.id === state.clusterId);
   if (clusterHost) {
     clusterHost.textContent = selected
@@ -1096,39 +1869,180 @@ async function paintManagement() {
   let details = [];
   if (state.clusterId) {
     details = await api("/api/namespace-details?" + clusterQuery());
+    if (!namespaceScopeEmpty()) {
+      details = details.filter((item) => state.selectedNamespaces.has(item.name));
+    } else {
+      details = [];
+    }
   }
-  namespaceHost.innerHTML = details.length ? details.map((item) => `
+  if (setHTML(namespaceHost, details.length ? details.map((item) => `
     <div class="cluster-row">
       <div><strong>${esc(item.name)}</strong><div class="muted">${chip(item.status)}</div></div>
       ${item.deletable && item.status !== "Terminating"
         ? `<button type="button" class="danger" data-delete-namespace="${esc(item.name)}">Delete</button>`
         : `<span class="muted">${item.deletable ? "Removing" : "System"}</span>`}
-    </div>`).join("") : `<p class="muted">${state.clusterId ? "No namespaces." : "No cluster selected."}</p>`;
-  namespaceHost.querySelectorAll("[data-delete-namespace]").forEach((button) => {
-    button.addEventListener("click", () => deleteNamespace(button.dataset.deleteNamespace));
-  });
-  clusterRows.innerHTML = state.clusters.length ? state.clusters.map((cluster) => `
+    </div>`).join("") : `<p class="muted">${state.clusterId ? "No namespaces selected." : "No cluster selected."}</p>`)) {
+    namespaceHost.querySelectorAll("[data-delete-namespace]").forEach((button) => {
+      button.addEventListener("click", () => deleteNamespace(button.dataset.deleteNamespace));
+    });
+  }
+  const form = document.getElementById("namespace-form");
+  if (form) {
+    form.querySelector("button").disabled = !state.clusterId;
+  }
+  document.getElementById("counts").textContent = selected
+    ? selected.name + " · " + details.length + " namespace" + (details.length === 1 ? "" : "s")
+    : "No cluster selected";
+}
+
+async function paintManagedClusters() {
+  const clusterRows = document.getElementById("cluster-rows");
+  if (!clusterRows) return;
+  if (setHTML(clusterRows, state.clusters.length ? state.clusters.map((cluster) => `
     <div class="cluster-row">
       <div><strong>${esc(cluster.name)}</strong><div class="muted">${esc(cluster.server)} · ${esc(cluster.source)}${cluster.id === state.clusterId ? " · selected" : ""}</div></div>
       <div class="inline">
         <button type="button" data-activate="${esc(cluster.id)}">Use</button>
         ${cluster.demo ? "" : `<button type="button" class="danger" data-delete="${esc(cluster.id)}">Remove</button>`}
       </div>
-    </div>`).join("") : `<p class="muted">No clusters.</p>`;
-  clusterRows.querySelectorAll("[data-activate]").forEach((button) => {
-    button.addEventListener("click", () => activateCluster(button.dataset.activate));
-  });
-  clusterRows.querySelectorAll("[data-delete]").forEach((button) => {
-    button.addEventListener("click", () => removeCluster(button.dataset.delete));
-  });
-  const form = document.getElementById("namespace-form");
-  if (form) {
-    form.querySelector("button").disabled = !state.clusterId;
+    </div>`).join("") : `<p class="muted">No clusters.</p>`)) {
+    clusterRows.querySelectorAll("[data-activate]").forEach((button) => {
+      button.addEventListener("click", () => activateCluster(button.dataset.activate));
+    });
+    clusterRows.querySelectorAll("[data-delete]").forEach((button) => {
+      button.addEventListener("click", () => removeCluster(button.dataset.delete));
+    });
   }
-  const kindLabel = (MANAGE_KINDS.find(([value]) => value === state.management.kind) || MANAGE_KINDS[0])[1];
-  document.getElementById("counts").textContent = selected
-    ? selected.name + " · " + resources.length + " " + kindLabel.toLowerCase()
-    : "No cluster selected";
+  document.getElementById("counts").textContent = state.clusters.length + " cluster" + (state.clusters.length === 1 ? "" : "s");
+}
+
+function paintLdapPanel() {
+  const host = document.getElementById("ldap-panel");
+  if (!host) return;
+  if (setHTML(host, renderLdapPanel(state.management.ldap))) {
+    wireLdapPanel();
+  }
+}
+
+function renderLdapPanel(ldap) {
+  return `
+    <h2>LDAP login</h2>
+    <p class="muted">Defaults come from the server's application.yml / environment variables. Saving here writes an override - the bind password encrypted - under the server's data directory, and it applies on the next login attempt. Turning login on or off needs a restart.</p>
+    ${ldap.restartRequired ? `<p class="notice">Restart the dashboard for the login on/off change to take effect.</p>` : ""}
+    <label class="inline"><input id="ldap-enabled" type="checkbox" ${ldap.enabled ? "checked" : ""}> Require Active Directory login</label>
+    <label>Host <input id="ldap-host" placeholder="acct01.us.lmco.com" autocomplete="off" value="${esc(ldap.host)}"></label>
+    <label>Port <input id="ldap-port" type="number" min="1" max="65535" value="${esc(ldap.port)}"></label>
+    <label>Default domain <input id="ldap-domain" placeholder="us" autocomplete="off" value="${esc(ldap.defaultDomain)}"></label>
+    <label>Search base DN <input id="ldap-base-dn" placeholder="dc=us,dc=lmco,dc=com" autocomplete="off" value="${esc(ldap.searchBaseDn)}"></label>
+    <label>Access group (AD group CN) <input id="ldap-group" placeholder="K8sDashboardUsers" autocomplete="off" value="${esc(ldap.group)}"></label>
+    <label>Bind username <input id="ldap-bind-username" placeholder="svc-dashboard" autocomplete="off" value="${esc(ldap.bindUsername)}"></label>
+    <label>Bind password <span class="muted">${ldap.hasBindPassword ? "(a password is set)" : "(none set)"}</span>
+      <div class="secret">
+        <input id="ldap-bind-password" type="password" autocomplete="new-password" placeholder="${ldap.hasBindPassword ? "Leave blank to keep the current password" : ""}" value="${esc(ldap.bindPassword)}">
+        <button type="button" id="ldap-bind-password-toggle" aria-label="Show bind password" aria-pressed="false">
+          <svg class="eye-on" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></svg>
+          <svg class="eye-off" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.5 6.2A10.6 10.6 0 0 1 12 6c6.5 0 10 6 10 6a18 18 0 0 1-3.1 3.7"/><path d="M6.2 6.8C3.9 8.4 2 12 2 12s3.5 6 10 6c1.1 0 2.2-.2 3.2-.6"/><path d="M9.9 9.9a2.5 2.5 0 0 0 3.6 3.6"/></svg>
+        </button>
+      </div>
+    </label>
+    <label class="inline"><input id="ldap-clear-password" type="checkbox" ${ldap.clearBindPassword ? "checked" : ""} ${ldap.hasBindPassword ? "" : "disabled"}> Clear the stored bind password</label>
+    <div class="actions">
+      <button class="primary" id="ldap-save" type="button" ${ldap.saving ? "disabled" : ""}>${ldap.saving ? "Saving…" : "Save"}</button>
+    </div>
+    <p id="ldap-message" class="muted">${esc(ldap.message)}</p>`;
+}
+
+function wireLdapPanel() {
+  const field = (id, key, parse) => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.addEventListener("input", (event) => {
+      state.management.ldap[key] = parse ? parse(event.target.value) : event.target.value;
+    });
+  };
+  const enabledInput = document.getElementById("ldap-enabled");
+  if (enabledInput) {
+    enabledInput.addEventListener("change", (event) => {
+      state.management.ldap.enabled = event.target.checked;
+    });
+  }
+  field("ldap-host", "host");
+  field("ldap-port", "port", (value) => parseInt(value, 10) || 0);
+  field("ldap-domain", "defaultDomain");
+  field("ldap-base-dn", "searchBaseDn");
+  field("ldap-group", "group");
+  field("ldap-bind-username", "bindUsername");
+  field("ldap-bind-password", "bindPassword");
+  const clearInput = document.getElementById("ldap-clear-password");
+  if (clearInput) {
+    clearInput.addEventListener("change", (event) => {
+      state.management.ldap.clearBindPassword = event.target.checked;
+    });
+  }
+  const toggle = document.getElementById("ldap-bind-password-toggle");
+  if (toggle) {
+    toggle.addEventListener("click", () => {
+      const input = document.getElementById("ldap-bind-password");
+      if (!input) return;
+      const show = input.type === "password";
+      input.type = show ? "text" : "password";
+      toggle.setAttribute("aria-pressed", show ? "true" : "false");
+      toggle.setAttribute("aria-label", show ? "Hide bind password" : "Show bind password");
+    });
+  }
+  const saveButton = document.getElementById("ldap-save");
+  if (saveButton) saveButton.addEventListener("click", saveLdapSettings);
+}
+
+async function loadLdapSettings() {
+  try {
+    const settings = await api("/api/management/ldap");
+    Object.assign(state.management.ldap, settings, {
+      loaded: true,
+      saving: false,
+      bindPassword: "",
+      clearBindPassword: false,
+      message: ""
+    });
+  } catch (error) {
+    state.management.ldap.message = error.message;
+  }
+  paintLdapPanel();
+}
+
+async function saveLdapSettings() {
+  const ldap = state.management.ldap;
+  ldap.saving = true;
+  ldap.message = "";
+  paintLdapPanel();
+  try {
+    const settings = await api("/api/management/ldap", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: ldap.enabled,
+        host: ldap.host,
+        port: ldap.port,
+        defaultDomain: ldap.defaultDomain,
+        searchBaseDn: ldap.searchBaseDn,
+        group: ldap.group,
+        bindUsername: ldap.bindUsername,
+        bindPassword: ldap.bindPassword,
+        clearBindPassword: ldap.clearBindPassword
+      })
+    });
+    Object.assign(state.management.ldap, settings, {
+      saving: false,
+      bindPassword: "",
+      clearBindPassword: false,
+      message: settings.restartRequired
+        ? "Saved. Restart the dashboard for the login on/off change to take effect."
+        : "Saved."
+    });
+  } catch (error) {
+    ldap.saving = false;
+    ldap.message = error.message;
+  }
+  paintLdapPanel();
 }
 
 async function createNamespace(event) {
@@ -1251,38 +2165,46 @@ async function loadKubeconfigFile(file) {
   notice("");
 }
 
-function closeModal() {
-  document.getElementById("modal").classList.add("hidden");
-}
-
 function connectLive() {
   if (state.source) state.source.close();
-  const token = state.token ? "?access_token=" + encodeURIComponent(state.token) : "";
-  const source = new EventSource("/api/live" + token);
-  const kick = () => {
-    if (!state.live || document.hidden) return;
+  // EventSource always sends the browser's cookies for a same-origin URL,
+  // so the session cookie that authenticates fetch() calls covers this too.
+  const source = new EventSource("/api/live");
+  // The server's own "tick" is ignored here: the client drives its own refresh
+  // cadence (see startLiveTimer) so the selectable interval actually takes effect.
+  // "changed" means something really did change, so it can jump the queue - but
+  // on a busy cluster these can arrive far faster than the chosen interval, so
+  // they're throttled to it too (otherwise the dropdown would have no visible
+  // effect: a chatty cluster's "changed" events would just dominate instead).
+  source.addEventListener("changed", () => {
+    if (!state.live || document.hidden || state.refreshInterval === REFRESH_MANUAL) return;
+    const now = Date.now();
+    if (now - state.lastAutoRefresh < state.refreshInterval) return;
+    state.lastAutoRefresh = now;
     window.clearTimeout(state.timer);
     state.timer = window.setTimeout(refresh, 200);
-  };
-  source.addEventListener("tick", kick);
-  source.addEventListener("changed", kick);
+  });
   state.source = source;
 }
 
-function showGate() {
-  document.getElementById("gate").classList.remove("hidden");
-}
-
-function hideGate() {
-  document.getElementById("gate").classList.add("hidden");
+function goToLogin() {
+  window.location.href = "/login.html";
 }
 
 async function boot() {
-  hideGate();
   await loadClusters();
+  // No real kubeconfig has been added yet - only the demo cluster (or nothing) is
+  // available - so start the user on Management, focused on where to add one,
+  // instead of a resource view with nothing but demo data to show.
+  if (state.clusters.every((cluster) => cluster.demo)) {
+    state.tab = "management";
+    state.management.tab = "clusters";
+    state.management.focusClusterName = true;
+  }
   if (state.clusterId) await loadNamespaces(true);
   await refresh();
   connectLive();
+  startLiveTimer();
 }
 
 const PANEL_RAIL = 44;
@@ -1340,7 +2262,9 @@ function installSplitters() {
   const workspace = document.getElementById("workspace");
   if (!workspace) return;
   setPanelCollapsed("namespaces", storageGet(sessionStorage, PANEL_COLLAPSE.namespaces.key) === "1", false);
-  setPanelCollapsed("detail", storageGet(sessionStorage, PANEL_COLLAPSE.detail.key) === "1", false);
+  // The manifest panel defaults to collapsed until the user opts into keeping it open.
+  const detailStored = storageGet(sessionStorage, PANEL_COLLAPSE.detail.key);
+  setPanelCollapsed("detail", detailStored === null ? true : detailStored === "1", false);
   bindSplitter(document.getElementById("split-namespaces"), "namespaces");
   bindSplitter(document.getElementById("split-detail"), "detail");
   if (window.ResizeObserver) {
@@ -1408,7 +2332,10 @@ function resizePanel(workspace, side, clientX) {
   layoutPanels();
 }
 
-/* Preferred shares of the workspace stay fixed. Applied widths are whatever fits this window. */
+/* Preferred shares of the workspace stay fixed. Applied widths are whatever fits this window.
+   The manifest (detail) panel floats over main as an overlay rather than sharing the grid with
+   it, so only namespaces competes with main for space here - opening, closing, or resizing the
+   manifest panel never changes main's width. */
 function layoutPanels() {
   const workspace = document.getElementById("workspace");
   if (!workspace) return;
@@ -1419,50 +2346,22 @@ function layoutPanels() {
   if (total < 48) return;
   ensurePanelRatios(total);
 
-  const open = {
-    namespaces: !panelCollapsed("namespaces"),
-    detail: !panelCollapsed("detail")
-  };
-  const widths = {
-    namespaces: open.namespaces ? desiredPanelWidth(total, "namespaces") : PANEL_RAIL,
-    detail: open.detail ? desiredPanelWidth(total, "detail") : PANEL_RAIL
-  };
+  const nsOpen = !panelCollapsed("namespaces");
+  const detailOpen = !panelCollapsed("detail");
   const mainFloor = Math.min(MAIN_MIN, Math.max(96, Math.round(total * 0.34)));
-  const overflow = widths.namespaces + widths.detail + mainFloor - total;
-  if (overflow > 0) shrinkPanelsToFit(widths, open, total, overflow);
 
-  const hardMain = 64;
-  if (widths.namespaces + widths.detail > total - hardMain) {
-    const budget = Math.max(hardMain, total - hardMain);
-    const scale = budget / (widths.namespaces + widths.detail);
-    widths.namespaces = Math.max(open.namespaces ? 56 : PANEL_RAIL, Math.floor(widths.namespaces * scale));
-    widths.detail = Math.max(open.detail ? 56 : PANEL_RAIL, Math.floor(widths.detail * scale));
-    if (widths.namespaces + widths.detail > total - hardMain) {
-      widths.detail = Math.max(open.detail ? 56 : PANEL_RAIL, total - hardMain - widths.namespaces);
-    }
+  let nsWidth = nsOpen ? desiredPanelWidth(total, "namespaces") : PANEL_RAIL;
+  if (nsOpen) {
+    const nsFloor = Math.min(PANEL_LIMITS.namespaces.min, Math.max(72, Math.round(total * 0.14)));
+    const nsCeiling = Math.max(nsFloor, total - PANEL_RAIL - mainFloor);
+    nsWidth = Math.min(nsWidth, nsCeiling);
   }
 
-  paintPanelWidth(workspace, "namespaces", widths.namespaces);
-  paintPanelWidth(workspace, "detail", widths.detail);
-}
+  const detailCeiling = Math.max(160, total - PANEL_RAIL);
+  const detailWidth = detailOpen ? Math.min(desiredPanelWidth(total, "detail"), detailCeiling) : PANEL_RAIL;
 
-function shrinkPanelsToFit(widths, open, total, overflow) {
-  const floors = {
-    namespaces: open.namespaces ? Math.min(PANEL_LIMITS.namespaces.min, Math.max(72, Math.round(total * 0.14))) : PANEL_RAIL,
-    detail: open.detail ? Math.min(PANEL_LIMITS.detail.min, Math.max(96, Math.round(total * 0.18))) : PANEL_RAIL
-  };
-  const nsSlack = open.namespaces ? Math.max(0, widths.namespaces - floors.namespaces) : 0;
-  const detailSlack = open.detail ? Math.max(0, widths.detail - floors.detail) : 0;
-  const slack = nsSlack + detailSlack;
-  if (slack <= 0) {
-    widths.namespaces = floors.namespaces;
-    widths.detail = floors.detail;
-    return;
-  }
-  const cut = Math.min(overflow, slack);
-  const nsCut = nsSlack ? Math.round(cut * (nsSlack / slack)) : 0;
-  widths.namespaces -= nsCut;
-  widths.detail -= cut - nsCut;
+  paintPanelWidth(workspace, "namespaces", nsWidth);
+  paintPanelWidth(workspace, "detail", detailWidth);
 }
 
 function desiredPanelWidth(total, side) {
@@ -1657,7 +2556,9 @@ function rememberTerminalRatio() {
 function installTerminal() {
   const stage = document.getElementById("stage");
   if (!stage) return;
-  setTerminalCollapsed(storageGet(sessionStorage, TERMINAL_COLLAPSED) === "1", false);
+  // The commands panel defaults to collapsed until the user opts into keeping it open.
+  const terminalStored = storageGet(sessionStorage, TERMINAL_COLLAPSED);
+  setTerminalCollapsed(terminalStored === null ? true : terminalStored === "1", false);
   try {
     const saved = JSON.parse(storageGet(sessionStorage, TERMINAL_HISTORY) || "[]");
     state.terminal.history = Array.isArray(saved) ? saved.filter((item) => typeof item === "string") : [];
@@ -1921,6 +2822,153 @@ function acceptSuggestion(index) {
   scheduleComplete();
 }
 
+// Reusable Inline + List prediction for any plain text input that picks a
+// value from a known set (namespaces, deployments, pods, containers). Wraps
+// the input with a ghost-text overlay (Tab / ArrowRight-at-end accepts it,
+// mirroring the terminal) and a dropdown list (Up/Down to move, Enter or a
+// click to accept, Escape to dismiss).
+function attachPrediction(input, fetchSuggestions) {
+  if (!input || input.dataset.predictAttached) return;
+  input.dataset.predictAttached = "true";
+
+  const wrap = document.createElement("div");
+  wrap.className = "predict-wrap";
+  input.replaceWith(wrap);
+  const ghost = document.createElement("div");
+  ghost.className = "predict-ghost";
+  ghost.setAttribute("aria-hidden", "true");
+  const list = document.createElement("ul");
+  list.className = "predict-list";
+  list.setAttribute("role", "listbox");
+  list.hidden = true;
+  list.id = (input.id || "predict") + "-list";
+  wrap.append(ghost, input, list);
+
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-expanded", "false");
+  input.setAttribute("aria-controls", list.id);
+
+  const local = { items: [], active: 0, timer: null, abort: null, seq: 0 };
+
+  function paintGhostLocal() {
+    ghost.replaceChildren();
+    const suggestion = local.items[local.active];
+    const value = input.value;
+    if (!suggestion || !value || input.selectionStart !== value.length) return;
+    if (!suggestion.toLowerCase().startsWith(value.toLowerCase())) return;
+    const rest = suggestion.slice(value.length);
+    if (!rest) return;
+    const typed = document.createElement("span");
+    typed.className = "typed";
+    typed.textContent = value;
+    const more = document.createElement("span");
+    more.className = "rest";
+    more.textContent = rest;
+    ghost.append(typed, more);
+  }
+
+  function hide() {
+    local.items = [];
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+    paintGhostLocal();
+  }
+
+  function paint() {
+    list.innerHTML = "";
+    if (!local.items.length) {
+      hide();
+      return;
+    }
+    local.items.forEach((value, index) => {
+      const row = document.createElement("li");
+      row.dataset.index = String(index);
+      row.setAttribute("role", "option");
+      row.id = list.id + "-" + index;
+      if (index === local.active) row.className = "active";
+      row.setAttribute("aria-selected", index === local.active ? "true" : "false");
+      row.textContent = value;
+      list.append(row);
+    });
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    input.setAttribute("aria-activedescendant", list.id + "-" + local.active);
+    paintGhostLocal();
+  }
+
+  function accept(index) {
+    const value = local.items[index];
+    if (value == null) return;
+    input.value = value;
+    hide();
+    input.focus();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  async function run() {
+    const query = input.value;
+    const seq = ++local.seq;
+    if (local.abort) local.abort.abort();
+    const abort = new AbortController();
+    local.abort = abort;
+    let items;
+    try {
+      items = await fetchSuggestions(query, abort.signal);
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      items = [];
+    }
+    if (seq !== local.seq || document.activeElement !== input) return;
+    const lower = query.toLowerCase();
+    local.items = [...new Set((items || []).filter(Boolean))].filter((value) => value.toLowerCase() !== lower);
+    local.active = 0;
+    paint();
+  }
+
+  function schedule() {
+    window.clearTimeout(local.timer);
+    local.timer = window.setTimeout(run, 120);
+  }
+
+  input.addEventListener("input", () => {
+    hide();
+    schedule();
+  });
+  input.addEventListener("focus", schedule);
+  input.addEventListener("blur", () => window.setTimeout(hide, 150));
+  input.addEventListener("keydown", (event) => {
+    const items = local.items;
+    if (event.key === "Escape") {
+      if (items.length) {
+        event.preventDefault();
+        hide();
+      }
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (!items.length) return;
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      local.active = (local.active + delta + items.length) % items.length;
+      paint();
+      return;
+    }
+    if (event.key === "Tab" || (event.key === "ArrowRight" && atEnd(input) && ghost.querySelector(".rest"))) {
+      if (!items.length) return;
+      event.preventDefault();
+      accept(local.active);
+    }
+  });
+  list.addEventListener("mousedown", (event) => {
+    const item = event.target.closest("li");
+    if (!item || item.dataset.index == null) return;
+    event.preventDefault();
+    accept(Number(item.dataset.index));
+  });
+}
+
 function recallHistory(delta) {
   const input = document.getElementById("terminal-input");
   const history = state.terminal.history;
@@ -2088,20 +3136,33 @@ document.getElementById("cluster").addEventListener("change", async () => {
   }
 });
 
-["query", "label", "image", "node"].forEach((id) => {
+["query", "label", "image", "node", "status", "name"].forEach((id) => {
   document.getElementById(id).addEventListener("input", () => {
     window.clearTimeout(state.timer);
     state.timer = window.setTimeout(refresh, 250);
   });
 });
 
+attachPrediction(document.getElementById("label"), suggestLabels);
+attachPrediction(document.getElementById("image"), suggestImages);
+attachPrediction(document.getElementById("node"), suggestNodes);
+attachPrediction(document.getElementById("status"), suggestStatuses);
+attachPrediction(document.getElementById("name"), suggestNames);
+
 document.getElementById("live").addEventListener("change", (event) => {
   state.live = event.target.checked;
+  startLiveTimer();
 });
 
 applyTheme(storedTheme());
 document.getElementById("theme").addEventListener("change", (event) => {
   applyTheme(event.target.value);
+});
+
+applyRefreshInterval(storedRefreshInterval());
+document.getElementById("refresh-interval").addEventListener("change", (event) => {
+  const value = event.target.value;
+  applyRefreshInterval(value === REFRESH_MANUAL ? REFRESH_MANUAL : parseInt(value, 10));
 });
 
 document.getElementById("ns-all").addEventListener("click", () => {
@@ -2117,28 +3178,10 @@ document.getElementById("namespace-collapse").addEventListener("click", () => {
 document.getElementById("detail-collapse").addEventListener("click", () => {
   setPanelCollapsed("detail", !panelCollapsed("detail"), true);
 });
-document.getElementById("apply-open").addEventListener("click", openApply);
-document.getElementById("clusters-open").addEventListener("click", () => {
-  if (state.tab !== "management") {
-    state.tab = "management";
-    state.shellTab = "";
-  }
-  refresh();
-});
 installSplitters();
 installTerminal();
-document.getElementById("gate-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  state.token = document.getElementById("gate-token").value;
-  sessionStorage.setItem("k8s-dashboard-token", state.token);
-  try {
-    await boot();
-  } catch (error) {
-    document.getElementById("gate-error").textContent = error.status === 401 ? "Token was rejected." : error.message;
-  }
-});
 
 boot().catch((error) => {
-  if (error.status === 401) showGate();
+  if (error.status === 401) goToLogin();
   else notice(error.message);
 });

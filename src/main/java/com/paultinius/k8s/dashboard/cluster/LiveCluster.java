@@ -38,6 +38,8 @@ import org.springframework.http.HttpStatus;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.net.BindException;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
@@ -51,7 +53,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 final class LiveCluster implements ClusterClient {
 
@@ -67,6 +74,16 @@ final class LiveCluster implements ClusterClient {
     private final Consumer<String> onChange;
     private final Object lock = new Object();
     private final List<Watch> watches = new ArrayList<>();
+    // Namespace-scoped resource lookups (pods, deployments, services, ...) hit the API server
+    // once per namespace. Running those requests on this pool instead of sequentially keeps an
+    // overview/list call for several namespaces fast - a slow sequential overview fetch is what
+    // let a live-tick refresh overlap the still-running one on the frontend and made the table
+    // flash while it was still loading.
+    private final ExecutorService executor = Executors.newFixedThreadPool(16, runnable -> {
+        Thread thread = new Thread(runnable, "k8s-cluster-io");
+        thread.setDaemon(true);
+        return thread;
+    });
     private KubernetesClient client;
     private boolean watchesStarted;
     private String version = "";
@@ -177,7 +194,21 @@ final class LiveCluster implements ClusterClient {
 
     @Override
     public Overview overview(Set<String> namespaces) {
-        List<ResourceView> pods = list(ResourceKind.POD, namespaces);
+        // Each list()/metrics() call already fans out across the selected namespaces on the
+        // shared io executor, but the different kinds were previously fetched one after another,
+        // so a many-namespace overview took the sum of every kind's time (seconds) instead of the
+        // slowest one. Kicking all of them off up front - on the JVM's common pool, not the io
+        // executor those calls themselves use, so this fan-out can't starve or deadlock on it -
+        // lets them run together.
+        CompletableFuture<List<ResourceView>> podsFuture = CompletableFuture.supplyAsync(() -> list(ResourceKind.POD, namespaces));
+        CompletableFuture<List<ResourceView>> eventsFuture = CompletableFuture.supplyAsync(() -> list(ResourceKind.EVENT, namespaces));
+        CompletableFuture<Integer> deploymentsFuture = CompletableFuture.supplyAsync(() -> list(ResourceKind.DEPLOYMENT, namespaces).size());
+        CompletableFuture<Integer> servicesFuture = CompletableFuture.supplyAsync(() -> list(ResourceKind.SERVICE, namespaces).size());
+        CompletableFuture<Integer> configMapsFuture = CompletableFuture.supplyAsync(() -> list(ResourceKind.CONFIG_MAP, namespaces).size());
+        CompletableFuture<Integer> nodesFuture = CompletableFuture.supplyAsync(() -> list(ResourceKind.NODE, Set.of()).size());
+        CompletableFuture<List<Overview.MetricRow>> metricsFuture = CompletableFuture.supplyAsync(() -> metrics(namespaces));
+
+        List<ResourceView> pods = joinOrThrow(podsFuture);
         int ready = (int) pods.stream().filter(pod -> "Running".equals(pod.status())).count();
         Map<String, Integer> phases = new LinkedHashMap<>();
         for (ResourceView pod : pods) {
@@ -185,7 +216,7 @@ final class LiveCluster implements ClusterClient {
             phases.put(pod.status(), count == null ? 1 : count + 1);
         }
         List<ResourceView> attention = new ArrayList<>();
-        for (ResourceView event : list(ResourceKind.EVENT, namespaces)) {
+        for (ResourceView event : joinOrThrow(eventsFuture)) {
             if ("Warning".equals(event.status())) {
                 attention.add(event);
             }
@@ -203,14 +234,14 @@ final class LiveCluster implements ClusterClient {
                 namespaces == null || namespaces.isEmpty() ? namespaces().size() : namespaces.size(),
                 pods.size(),
                 ready,
-                list(ResourceKind.DEPLOYMENT, namespaces).size(),
-                list(ResourceKind.SERVICE, namespaces).size(),
-                list(ResourceKind.CONFIG_MAP, namespaces).size(),
-                list(ResourceKind.NODE, Set.of()).size(),
+                joinOrThrow(deploymentsFuture),
+                joinOrThrow(servicesFuture),
+                joinOrThrow(configMapsFuture),
+                joinOrThrow(nodesFuture),
                 (int) attention.stream().filter(item -> "Event".equals(item.kind())).count(),
                 phases.entrySet().stream().map(entry -> new Overview.PhaseCount(entry.getKey(), entry.getValue())).toList(),
-                attention.stream().limit(8).toList(),
-                metrics(namespaces)
+                attention,
+                joinOrThrow(metricsFuture)
         );
     }
 
@@ -225,8 +256,8 @@ final class LiveCluster implements ClusterClient {
                 Map<String, Usage> usage = nodeUsage();
                 yield nodes().stream()
                         .map(node -> {
-                            Usage row = usage.getOrDefault(node.getMetadata().getName(), new Usage("", ""));
-                            return LiveViews.node(node, row.cpu(), row.memory());
+                            Usage row = usage.get(node.getMetadata().getName());
+                            return LiveViews.node(node, nodeCpuText(node, row), nodeMemoryText(node, row));
                         })
                         .sorted(byName())
                         .toList();
@@ -266,7 +297,7 @@ final class LiveCluster implements ClusterClient {
             case NODE -> {
                 Node node = require(client().nodes().withName(name).get(), "Node", "", name);
                 Usage usage = usage(node);
-                yield LiveViews.detail(LiveViews.node(node, usage.cpu(), usage.memory()), node, List.of());
+                yield LiveViews.detail(LiveViews.node(node, nodeCpuText(node, usage), nodeMemoryText(node, usage)), node, List.of());
             }
             case EVENT -> {
                 Event event = require(client().v1().events().inNamespace(namespace).withName(name).get(), "Event", namespace, name);
@@ -456,6 +487,7 @@ final class LiveCluster implements ClusterClient {
                 client = null;
             }
         }
+        executor.shutdownNow();
     }
 
     private KubernetesClient client() {
@@ -515,44 +547,28 @@ final class LiveCluster implements ClusterClient {
         if (namespaces == null || namespaces.isEmpty()) {
             return call(() -> client().pods().inAnyNamespace().list().getItems());
         }
-        List<Pod> pods = new ArrayList<>();
-        for (String namespace : namespaces) {
-            pods.addAll(call(() -> client().pods().inNamespace(namespace).list().getItems()));
-        }
-        return pods;
+        return fetchPerNamespace(namespaces, namespace -> client().pods().inNamespace(namespace).list().getItems());
     }
 
     private List<Deployment> deployments(Set<String> namespaces) {
         if (namespaces == null || namespaces.isEmpty()) {
             return call(() -> client().apps().deployments().inAnyNamespace().list().getItems());
         }
-        List<Deployment> deployments = new ArrayList<>();
-        for (String namespace : namespaces) {
-            deployments.addAll(call(() -> client().apps().deployments().inNamespace(namespace).list().getItems()));
-        }
-        return deployments;
+        return fetchPerNamespace(namespaces, namespace -> client().apps().deployments().inNamespace(namespace).list().getItems());
     }
 
     private List<Service> services(Set<String> namespaces) {
         if (namespaces == null || namespaces.isEmpty()) {
             return call(() -> client().services().inAnyNamespace().list().getItems());
         }
-        List<Service> services = new ArrayList<>();
-        for (String namespace : namespaces) {
-            services.addAll(call(() -> client().services().inNamespace(namespace).list().getItems()));
-        }
-        return services;
+        return fetchPerNamespace(namespaces, namespace -> client().services().inNamespace(namespace).list().getItems());
     }
 
     private List<ConfigMap> configMaps(Set<String> namespaces) {
         if (namespaces == null || namespaces.isEmpty()) {
             return call(() -> client().configMaps().inAnyNamespace().list().getItems());
         }
-        List<ConfigMap> configMaps = new ArrayList<>();
-        for (String namespace : namespaces) {
-            configMaps.addAll(call(() -> client().configMaps().inNamespace(namespace).list().getItems()));
-        }
-        return configMaps;
+        return fetchPerNamespace(namespaces, namespace -> client().configMaps().inNamespace(namespace).list().getItems());
     }
 
     private List<Node> nodes() {
@@ -563,11 +579,32 @@ final class LiveCluster implements ClusterClient {
         if (namespaces == null || namespaces.isEmpty()) {
             return call(() -> client().v1().events().inAnyNamespace().list().getItems());
         }
-        List<Event> events = new ArrayList<>();
-        for (String namespace : namespaces) {
-            events.addAll(call(() -> client().v1().events().inNamespace(namespace).list().getItems()));
+        return fetchPerNamespace(namespaces, namespace -> client().v1().events().inNamespace(namespace).list().getItems());
+    }
+
+    // Fetches one namespace's worth of resources at a time on the shared io executor instead of
+    // sequentially, so a kind lookup across many selected namespaces takes roughly as long as the
+    // slowest single namespace rather than the sum of all of them.
+    private <T> List<T> fetchPerNamespace(Set<String> namespaces, Function<String, List<T>> fetch) {
+        List<CompletableFuture<List<T>>> futures = namespaces.stream()
+                .map(namespace -> CompletableFuture.supplyAsync(() -> call(() -> fetch.apply(namespace)), executor))
+                .toList();
+        List<T> combined = new ArrayList<>();
+        for (CompletableFuture<List<T>> future : futures) {
+            combined.addAll(joinOrThrow(future));
         }
-        return events;
+        return combined;
+    }
+
+    private static <T> T joinOrThrow(CompletableFuture<T> future) {
+        try {
+            return future.join();
+        } catch (CompletionException exception) {
+            if (exception.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw exception;
+        }
     }
 
     private Set<String> namespacesOrAll(Set<String> namespaces) {
@@ -628,28 +665,32 @@ final class LiveCluster implements ClusterClient {
             if (namespaces == null || namespaces.isEmpty()) {
                 items.addAll(client().top().pods().metrics().getItems());
             } else {
-                for (String namespace : namespaces) {
-                    items.addAll(client().top().pods().metrics(namespace).getItems());
-                }
+                items.addAll(fetchPerNamespace(namespaces, namespace -> client().top().pods().metrics(namespace).getItems()));
             }
             List<Overview.MetricRow> rows = new ArrayList<>();
             for (PodMetrics metrics : items) {
-                String cpu = "";
-                String memory = "";
-                if (metrics.getContainers() != null && !metrics.getContainers().isEmpty()) {
-                    ContainerMetrics container = metrics.getContainers().get(0);
-                    cpu = quantity(container.getUsage(), "cpu");
-                    memory = quantity(container.getUsage(), "memory");
+                BigDecimal cpuCores = BigDecimal.ZERO;
+                BigDecimal memoryBytes = BigDecimal.ZERO;
+                if (metrics.getContainers() != null) {
+                    for (ContainerMetrics container : metrics.getContainers()) {
+                        Map<String, Quantity> usage = container.getUsage();
+                        if (usage == null) {
+                            continue;
+                        }
+                        if (usage.get("cpu") != null) {
+                            cpuCores = cpuCores.add(Quantity.getAmountInBytes(usage.get("cpu")));
+                        }
+                        if (usage.get("memory") != null) {
+                            memoryBytes = memoryBytes.add(Quantity.getAmountInBytes(usage.get("memory")));
+                        }
+                    }
                 }
                 rows.add(new Overview.MetricRow(
                         metrics.getMetadata().getNamespace(),
                         metrics.getMetadata().getName(),
-                        cpu,
-                        memory
+                        formatCpu(cpuCores),
+                        formatMemory(memoryBytes)
                 ));
-                if (rows.size() >= 12) {
-                    break;
-                }
             }
             return rows;
         } catch (RuntimeException exception) {
@@ -659,7 +700,7 @@ final class LiveCluster implements ClusterClient {
     }
 
     private Usage usage(Node node) {
-        return nodeUsage().getOrDefault(node.getMetadata().getName(), new Usage("", ""));
+        return nodeUsage().get(node.getMetadata().getName());
     }
 
     private Map<String, Usage> nodeUsage() {
@@ -668,13 +709,83 @@ final class LiveCluster implements ClusterClient {
             for (NodeMetrics metrics : client().top().nodes().metrics().getItems()) {
                 usage.put(
                         metrics.getMetadata().getName(),
-                        new Usage(quantity(metrics.getUsage(), "cpu"), quantity(metrics.getUsage(), "memory"))
+                        new Usage(amount(metrics.getUsage(), "cpu"), amount(metrics.getUsage(), "memory"))
                 );
             }
         } catch (RuntimeException exception) {
             log.debug("Node metrics unavailable for {}: {}", id, exception.getMessage());
         }
         return usage;
+    }
+
+    // Renders a node's CPU column as "used/allocatable" (e.g. "250m/4"), falling back to
+    // whichever half is available. Raw Quantity.toString() values (nanocores, binary suffixes)
+    // are never shown to the user.
+    private String nodeCpuText(Node node, Usage usage) {
+        return capacityText(
+                usage == null ? null : usage.cpu(),
+                allocatable(node, "cpu"),
+                LiveCluster::formatCpuAmount
+        );
+    }
+
+    private String nodeMemoryText(Node node, Usage usage) {
+        return capacityText(
+                usage == null ? null : usage.memory(),
+                allocatable(node, "memory"),
+                LiveCluster::formatMemoryAmount
+        );
+    }
+
+    private static String capacityText(BigDecimal used, BigDecimal total, Function<BigDecimal, String> formatter) {
+        String usedText = used == null ? "" : formatter.apply(used);
+        String totalText = total == null ? "" : formatter.apply(total);
+        if (usedText.isEmpty()) {
+            return totalText;
+        }
+        if (totalText.isEmpty()) {
+            return usedText;
+        }
+        return usedText + "/" + totalText;
+    }
+
+    private static BigDecimal allocatable(Node node, String key) {
+        if (node.getStatus() == null) {
+            return null;
+        }
+        Map<String, Quantity> allocatable = node.getStatus().getAllocatable();
+        Map<String, Quantity> capacity = node.getStatus().getCapacity();
+        Quantity quantity = allocatable != null && allocatable.get(key) != null ? allocatable.get(key) : (capacity == null ? null : capacity.get(key));
+        return quantity == null ? null : Quantity.getAmountInBytes(quantity);
+    }
+
+    private static BigDecimal amount(Map<String, Quantity> usage, String key) {
+        if (usage == null || usage.get(key) == null) {
+            return null;
+        }
+        return Quantity.getAmountInBytes(usage.get(key));
+    }
+
+    private static String formatCpuAmount(BigDecimal cores) {
+        if (cores.signum() <= 0) {
+            return "0";
+        }
+        if (cores.compareTo(BigDecimal.ONE) < 0) {
+            return cores.multiply(BigDecimal.valueOf(1000)).setScale(0, RoundingMode.HALF_UP) + "m";
+        }
+        return cores.setScale(2, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString();
+    }
+
+    private static String formatMemoryAmount(BigDecimal bytes) {
+        if (bytes.signum() <= 0) {
+            return "0";
+        }
+        BigDecimal gibibytes = bytes.divide(BigDecimal.valueOf(1024L * 1024L * 1024L), 2, RoundingMode.HALF_UP);
+        if (gibibytes.compareTo(BigDecimal.ONE) >= 0) {
+            return gibibytes.stripTrailingZeros().toPlainString() + "Gi";
+        }
+        BigDecimal mebibytes = bytes.divide(BigDecimal.valueOf(1024L * 1024L), 0, RoundingMode.HALF_UP);
+        return mebibytes + "Mi";
     }
 
     private String version() {
@@ -743,11 +854,20 @@ final class LiveCluster implements ClusterClient {
         return new DashboardException(status, message);
     }
 
-    private static String quantity(Map<String, Quantity> usage, String key) {
-        if (usage == null || usage.get(key) == null) {
+    private static String formatCpu(BigDecimal cores) {
+        if (cores.signum() <= 0) {
             return "";
         }
-        return usage.get(key).toString();
+        long millis = cores.multiply(BigDecimal.valueOf(1000)).setScale(0, RoundingMode.HALF_UP).longValueExact();
+        return millis + "m";
+    }
+
+    private static String formatMemory(BigDecimal bytes) {
+        if (bytes.signum() <= 0) {
+            return "";
+        }
+        long mebibytes = bytes.divide(BigDecimal.valueOf(1024L * 1024L), 0, RoundingMode.HALF_UP).longValueExact();
+        return mebibytes + "Mi";
     }
 
     private static boolean causedByBind(Throwable exception) {
@@ -773,6 +893,6 @@ final class LiveCluster implements ClusterClient {
         return Comparator.comparing((ResourceView view) -> view.namespace()).thenComparing(view -> view.name());
     }
 
-    private record Usage(String cpu, String memory) {
+    private record Usage(BigDecimal cpu, BigDecimal memory) {
     }
 }

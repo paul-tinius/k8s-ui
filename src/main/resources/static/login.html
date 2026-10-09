@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>K8S Dashboard - Sign in</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <script>
+    (function () {
+      var theme = "system";
+      try {
+        var saved = localStorage.getItem("k8s-dashboard-theme");
+        if (saved === "dark" || saved === "light" || saved === "system") theme = saved;
+      } catch (error) {
+        theme = "system";
+      }
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="gate">
+    <form id="login-form" class="gate-card" method="post" action="/login">
+      <h1>K8S Dashboard</h1>
+      <p>Sign in with your Active Directory account. Access is limited to the configured dashboard group.</p>
+      <label for="login-username">Username</label>
+      <input id="login-username" name="username" type="text" autocomplete="username" required autofocus>
+      <label for="login-password">Password</label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+  <script src="login.js"></script>
+</body>
+</html>

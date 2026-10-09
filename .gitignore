@@ -4,3 +4,5 @@ out/
 .idea/
 *.iml
 .k8s-dashboard/
+*.log
+certs/*.pem

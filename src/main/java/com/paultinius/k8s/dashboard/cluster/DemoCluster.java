@@ -123,7 +123,6 @@ public final class DemoCluster implements ClusterClient {
                 }
             }
             List<Overview.MetricRow> metrics = pods.stream()
-                    .limit(12)
                     .map(pod -> new Overview.MetricRow(pod.namespace, pod.name, pod.cpu, pod.memory))
                     .toList();
             int warnings = (int) events.stream()
@@ -146,7 +145,7 @@ public final class DemoCluster implements ClusterClient {
                     nodes.size(),
                     warnings,
                     phaseCounts,
-                    attention.stream().limit(8).toList(),
+                    attention,
                     metrics
             );
         }

@@ -40,7 +40,7 @@ securityContext:
   readOnlyRootFilesystem: false
   capabilities:
     drop:
-      - ALL
+    - ALL
 
 service:
   type: ClusterIP
@@ -68,9 +68,18 @@ dashboard:
   # Paths inside the pod. Each entry becomes DASHBOARD_CLUSTER_KUBECONFIGS_<index>.
   kubeconfigs: []
 
-auth:
-  # Set to create a Secret key. Leave empty to keep the reference optional.
-  token: ""
+ldap:
+  # False keeps the dashboard's previous no-auth behavior - for local/demo use.
+  enabled: false
+  host: "acct01.us.lmco.com"
+  port: 3269
+  defaultDomain: "us"
+  searchBaseDn: "dc=us,dc=lmco,dc=com"
+  # AD group CN. Only its members (via memberOf) may log in. Required when enabled.
+  group: ""
+  # Existing resource/service account used only to resolve the group's DN.
+  bindUsername: ""
+  bindPassword: ""
 
 ai:
   apiKey: ""
@@ -79,9 +88,9 @@ ai:
   baseUrl: ""
 
 secret:
-  # Use a Secret you created yourself. Keys default to token and xai-api-key.
+  # Use a Secret you created yourself. Keys default to these names.
   existingSecret: ""
-  tokenKey: token
+  ldapBindPasswordKey: ldap-bind-password
   apiKeyKey: xai-api-key
 
 # Uploaded kubeconfigs are stored on this volume. emptyDir is used when disabled,
@@ -100,10 +109,10 @@ ingress:
   className: ""
   annotations: {}
   hosts:
-    - host: dashboard.local
-      paths:
-        - path: /
-          pathType: Prefix
+  - host: dashboard.local
+    paths:
+    - path: /
+      pathType: Prefix
   tls: []
 
 istio:
@@ -114,7 +123,7 @@ istio:
   selector:
     istio: ingressgateway
   hosts:
-    - dashboard.local
+  - dashboard.local
   tls:
     enabled: false
     mode: SIMPLE

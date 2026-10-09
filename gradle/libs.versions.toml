@@ -7,7 +7,12 @@ spring-boot-dependencies = { module = "org.springframework.boot:spring-boot-depe
 spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web" }
 spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
 spring-boot-starter-validation = { module = "org.springframework.boot:spring-boot-starter-validation" }
+spring-boot-starter-security = { module = "org.springframework.boot:spring-boot-starter-security" }
+spring-security-ldap = { module = "org.springframework.security:spring-security-ldap" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+spring-security-test = { module = "org.springframework.security:spring-security-test" }
+unboundid-ldapsdk = { module = "com.unboundid:unboundid-ldapsdk", version = "6.0.11" }
 fabric8-kubernetes-client = { module = "io.fabric8:kubernetes-client", version.ref = "fabric8" }
 
 [plugins]

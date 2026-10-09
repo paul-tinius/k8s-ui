@@ -127,14 +127,15 @@ textarea { width: 100%; min-height: 180px; resize: vertical; }
 .brand strong { display: block; }
 .brand span, .muted, .refine span, label span { color: var(--muted); font-size: 0.82rem; }
 
-.cluster-pick, .search, .refine label, .theme-pick { display: grid; gap: 0.2rem; font-size: 0.78rem; color: var(--muted); }
-.cluster-pick select, .theme-pick select { max-width: min(18rem, 100%); }
+.cluster-pick, .search, .refine label, .theme-pick, .refresh-pick { display: grid; gap: 0.2rem; font-size: 0.78rem; color: var(--muted); }
+.cluster-pick select, .theme-pick select, .refresh-pick select { max-width: min(18rem, 100%); }
 .search input { width: min(360px, 36vw); }
 .live { display: flex; gap: 0.35rem; align-items: center; padding-bottom: 0.45rem; }
-.top-actions { display: flex; gap: 0.4rem; }
+.live:has(input:disabled) { opacity: 0.55; }
 
 .refine { align-items: center; }
 .refine label { grid-auto-flow: column; align-items: center; }
+.refine label.hidden { display: none; }
 #counts { margin-left: auto; }
 .notice { color: var(--coral); }
 
@@ -155,7 +156,10 @@ textarea { width: 100%; min-height: 180px; resize: vertical; }
 .body {
   position: relative;
   display: grid;
-  grid-template-columns: var(--namespaces-column, var(--namespaces-width, 18%)) minmax(0, 1fr) var(--detail-column, var(--detail-width, 28%));
+  /* The manifest panel floats over main as an overlay (see .detail below) instead of
+     taking a grid column, so it always keeps a rail-width slot here: opening, closing,
+     or resizing it never changes the width of the namespaces or main columns. */
+  grid-template-columns: var(--namespaces-column, var(--namespaces-width, 18%)) minmax(0, 1fr) 2.75rem;
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   min-width: 0;
@@ -173,7 +177,8 @@ textarea { width: 100%; min-height: 180px; resize: vertical; }
   touch-action: none;
 }
 #split-namespaces { left: calc(var(--namespaces-width, 18%) - 5px); }
-#split-detail { right: calc(var(--detail-width, 28%) - 5px); }
+/* Sits on top of the floating manifest overlay so it stays draggable. */
+#split-detail { right: calc(var(--detail-width, 28%) - 5px); z-index: 5; }
 .splitter::before {
   content: "";
   position: absolute;
@@ -361,6 +366,59 @@ body.resizing-row, body.resizing-row * { cursor: row-resize; user-select: none; 
 }
 #terminal-stop[hidden] { display: none; }
 
+/* Reusable Inline + List prediction, used on any text input that picks a
+   value from a known set (namespaces, deployments, pods, containers). */
+.predict-wrap {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.predict-wrap input {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  border-color: transparent;
+}
+.predict-ghost {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  padding: 0.4rem 0.55rem;
+  overflow: hidden;
+  white-space: pre;
+  pointer-events: none;
+  color: var(--muted);
+}
+.predict-ghost .typed { visibility: hidden; }
+.predict-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 5;
+  max-height: 11rem;
+  overflow: auto;
+  margin: 0.25rem 0 0;
+  padding: 0.25rem;
+  list-style: none;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.predict-list li {
+  padding: 0.28rem 0.45rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.predict-list li.active { background: var(--row); }
+
 .namespaces, .detail {
   display: flex;
   flex-direction: column;
@@ -374,6 +432,20 @@ body.resizing-row, body.resizing-row * { cursor: row-resize; user-select: none; 
 }
 
 .detail { border-right: 0; border-left: 1px solid var(--line); }
+
+@media (min-width: 981px) {
+  /* Open manifest panel floats over main instead of occupying a grid column, so
+     expanding/collapsing or resizing it never resizes the pods tab (or any other tab). */
+  .body:not(.detail-collapsed) .detail {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--detail-width, 28%);
+    z-index: 4;
+    box-shadow: var(--shadow);
+  }
+}
 
 .rail-tools { display: flex; flex: none; }
 .namespaces .rail-tools { justify-content: flex-start; }
@@ -404,7 +476,6 @@ body.resizing-row, body.resizing-row * { cursor: row-resize; user-select: none; 
 
 @media (min-width: 981px) {
   .body.namespaces-collapsed { --namespaces-column: 2.75rem; }
-  .body.detail-collapsed { --detail-column: 2.75rem; }
   .body.namespaces-collapsed #split-namespaces,
   .body.detail-collapsed #split-detail { display: none; }
   .body.namespaces-collapsed .namespaces,
@@ -457,7 +528,8 @@ h2, h3 { font-size: 0.95rem; margin: 0 0 0.6rem; font-weight: 600; }
 }
 .namespaces .copy-icon { display: none; }
 
-.copy-icon {
+.copy-icon,
+.icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -470,8 +542,8 @@ h2, h3 { font-size: 0.95rem; margin: 0 0 0.6rem; font-weight: 600; }
   line-height: 1;
   white-space: nowrap;
 }
-.copy-icon:hover,
-.copy-icon:focus-visible { color: var(--amber); }
+.copy-icon:hover, .icon-button:hover,
+.copy-icon:focus-visible, .icon-button:focus-visible { color: var(--amber); }
 .copy-icon[data-copied="true"] {
   width: auto;
   min-width: 4.6rem;
@@ -479,20 +551,40 @@ h2, h3 { font-size: 0.95rem; margin: 0 0 0.6rem; font-weight: 600; }
   font-size: 0.75rem;
   font-weight: 600;
 }
-.copy-icon:disabled { opacity: 0.45; cursor: default; }
-.copy-icon svg { display: block; }
+.copy-icon:disabled, .icon-button:disabled { opacity: 0.45; cursor: default; }
+.copy-icon svg, .icon-button svg { display: block; }
 .copy-line { display: inline-flex; align-items: center; gap: 0.35rem; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.refresh-btn.spinning svg { animation: spin 0.8s linear infinite; }
+.refresh-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.refresh-status:empty { display: none; }
+.refresh-status svg { animation: spin 0.8s linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .refresh-btn.spinning svg, .refresh-status svg { animation: none; }
+}
 
 .tab-tools {
   display: flex;
   justify-content: flex-end;
+  gap: 0.3rem;
   position: sticky;
   top: 0;
   z-index: 2;
   margin-bottom: 0.35rem;
   background: var(--bg);
 }
-#view:has(#log-output) .tab-tools { flex: 0 0 auto; }
+#view:has(#log-output) .tab-tools,
+#view:has(.table-wrap) .tab-tools,
+#view:has(.stack) .tab-tools,
+#view:has(.split) .tab-tools { flex: 0 0 auto; }
 
 .panel-head {
   display: flex;
@@ -519,8 +611,15 @@ main { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min
 .tabs button { border-bottom: 0; border-radius: 8px 8px 0 0; background: transparent; }
 .tabs button.active { background: var(--panel); border-color: var(--line); color: var(--amber); }
 
+/* The Management tab's own sub-navigation, same look as the main tabs but
+   sitting inside #view's padding instead of flush against the header. */
+.sub-tabs { padding: 0; margin: 0 0 0.7rem; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+
 #view { overflow: auto; min-height: 0; min-width: 0; padding: 0.8rem; }
-#view:has(#log-output) {
+#view:has(#log-output),
+#view:has(.table-wrap),
+#view:has(.stack),
+#view:has(.split) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -529,6 +628,20 @@ main { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min
   flex: 1 1 auto;
   min-height: 0;
   margin-top: 0.6rem;
+  overflow: auto;
+}
+/* The resource grid scrolls on its own so the toolbar above it and the
+   table header row within it can both stay pinned in place. */
+.table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+/* Management's panels scroll on their own so the refresh button above them
+   stays pinned instead of having panel content slide underneath it. */
+.stack {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
 }
 #view:has(#log-output) .inline label {
@@ -540,12 +653,85 @@ main { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min
 }
 #log-tail { width: auto; min-width: 4.5rem; }
 
-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
-th, td { text-align: left; padding: 0.45rem 0.4rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+/* table-layout: auto (the default) sizes every column to its widest cell; width: auto plus
+   min-width: 100% lets the table size to its content while still filling the panel when the
+   content is narrower than it. Columns stay nowrap by default so short values (status, CPU,
+   memory, …) don't get stretched - only columns opted into .wrap (long free text) break. */
+table { width: auto; min-width: 100%; border-collapse: collapse; font-size: 0.92rem; table-layout: auto; }
+th, td { text-align: left; padding: 0.45rem 0.4rem; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+td.wrap { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 th { color: var(--muted); font-weight: 600; font-size: 0.75rem; letter-spacing: 0.03em; }
+/* Column headers stay put while the table body scrolls beneath them. */
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+}
+.panel thead th { background: var(--panel); }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover, tr.selected { background: var(--row); }
 tr.group td { background: var(--group); color: var(--tide); font-weight: 600; }
+tr.group .group-arrow { display: inline-block; width: 1em; margin-right: 0.4em; font-size: 0.7em; }
+tr.group:hover td { background: var(--row); }
+
+/* Once a column has been dragged or double-click-fit, the grid switches to a
+   fixed layout driven by its <colgroup> so widths - including shrinking
+   below a column's natural content width - are actually honored. */
+#grid-table.fixed-cols { table-layout: fixed; }
+#grid-table.fixed-cols th, #grid-table.fixed-cols td { overflow: hidden; text-overflow: ellipsis; }
+#grid-table.fixed-cols td.wrap { overflow: visible; text-overflow: clip; }
+
+thead th.sortable {
+  cursor: pointer;
+  user-select: none;
+  padding-right: 1.1rem;
+}
+thead th.sortable:hover { color: var(--tide); }
+thead th.sortable .th-label {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+.sort-arrow { margin-left: 0.25rem; color: var(--amber); font-size: 0.7em; }
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.1rem 0.1rem;
+  font-size: 0.85rem;
+}
+.pagination button { padding: 0.2rem 0.6rem; }
+.pagination button:disabled { opacity: 0.45; cursor: default; }
+
+/* A thin drag handle on the right edge of each header cell. It sits on top
+   of the sticky header (position: sticky already makes th a positioning
+   context) so it stays reachable even once the body scrolls underneath. */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.col-resizer::after {
+  content: "";
+  position: absolute;
+  top: 20%;
+  bottom: 20%;
+  right: 3px;
+  width: 2px;
+  background: var(--line);
+}
+.col-resizer:hover::after { background: var(--amber); }
+body.col-resizing { cursor: col-resize; user-select: none; }
+body.col-resizing .col-resizer::after { background: var(--amber); }
 
 .chip {
   display: inline-block;
@@ -558,24 +744,44 @@ tr.group td { background: var(--group); color: var(--tide); font-weight: 600; }
 .chip.bad { background: var(--chip-bad); color: var(--coral); }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.6rem; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 0.75rem; }
+#view:has(.split) .cards { flex: 0 0 auto; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 0.75rem; cursor: default; }
 .card strong { display: block; font-size: 1.4rem; }
 .card span { color: var(--muted); font-size: 0.8rem; }
+.card small { display: block; color: var(--muted); font-size: 0.7rem; }
 
+/* The overview cards and the refresh button above them stay locked in
+   place; only this area (and the panels within it) scrolls. */
 .split {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  grid-template-columns: 1fr;
   gap: 0.8rem;
   margin-top: 0.8rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 0.75rem; min-width: 0; max-width: 100%; }
+/* The Attention and Pod metrics panels scroll on their own, with their
+   column headers pinned to the top of the panel instead of the page. */
+.split .panel {
+  display: flex;
+  flex-direction: column;
+  max-height: 24rem;
+}
+.split .panel h2 { flex: 0 0 auto; margin: 0 0 0.6rem; }
+.split .panel > div { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+/* The table itself (not the pagination row below it) owns the horizontal
+   scrollbar, so it shows directly under the rows instead of below Prev/Next. */
+.panel-table-scroll { overflow-x: auto; max-width: 100%; }
 .card, .stack, .assist, .manage { min-width: 0; max-width: 100%; }
-.assist label { display: grid; gap: 0.25rem; margin: 0.55rem 0; }
-.assist label.hidden { display: none; }
-.assist input, .assist select { width: min(420px, 100%); }
-.assist .secret { position: relative; width: min(420px, 100%); }
-.assist .secret input { width: 100%; padding-right: 2.3rem; }
-.assist .secret button {
+.assist label, .manage label { display: grid; gap: 0.25rem; margin: 0.55rem 0; }
+.assist label.hidden, .manage label.hidden { display: none; }
+.assist label.inline, .manage label.inline { display: flex; align-items: center; }
+.assist input:not([type="checkbox"]), .assist select { width: min(420px, 100%); }
+.assist .secret, .manage .secret { position: relative; width: min(420px, 100%); }
+.assist .secret input[type], .manage .secret input[type] { width: 100%; padding-right: 2.3rem; }
+.assist .secret button, .manage .secret button {
   position: absolute;
   top: 0;
   right: 0;
@@ -588,12 +794,12 @@ tr.group td { background: var(--group); color: var(--tide); font-weight: 600; }
   color: var(--muted);
   padding: 0;
 }
-.assist .secret button:hover,
-.assist .secret button:focus-visible { color: var(--amber); border-color: transparent; }
-.assist .secret svg { display: block; }
-.assist .secret .eye-off { display: none; }
-.assist .secret button[aria-pressed="true"] .eye-on { display: none; }
-.assist .secret button[aria-pressed="true"] .eye-off { display: block; }
+.assist .secret button:hover, .manage .secret button:hover,
+.assist .secret button:focus-visible, .manage .secret button:focus-visible { color: var(--amber); border-color: transparent; }
+.assist .secret svg, .manage .secret svg { display: block; }
+.assist .secret .eye-off, .manage .secret .eye-off { display: none; }
+.assist .secret button[aria-pressed="true"] .eye-on, .manage .secret button[aria-pressed="true"] .eye-on { display: none; }
+.assist .secret button[aria-pressed="true"] .eye-off, .manage .secret button[aria-pressed="true"] .eye-off { display: block; }
 
 pre, .yaml, textarea.answer {
   white-space: pre-wrap;
@@ -621,17 +827,10 @@ textarea.answer {
 .inline { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; min-width: 0; max-width: 100%; }
 .inline input, .inline select { max-width: 100%; width: auto; }
 .inline input:not([type="checkbox"]), .inline select { min-width: min(8rem, 100%); }
+.inline .predict-wrap { max-width: 100%; min-width: min(8rem, 100%); }
 
-.modal {
-  position: fixed;
-  inset: 0;
-  background: var(--scrim);
-  display: grid;
-  place-items: center;
-  padding: 1rem;
-}
-.modal.hidden, .gate.hidden, .hidden { display: none; }
-.dialog, .gate-card {
+.gate.hidden, .hidden { display: none; }
+.gate-card {
   width: min(720px, 100%);
   max-height: calc(100dvh - 2rem);
   overflow: auto;

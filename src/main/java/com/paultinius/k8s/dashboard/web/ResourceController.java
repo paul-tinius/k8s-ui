@@ -50,7 +50,9 @@ public class ResourceController {
             @RequestParam(required = false) String q,
             @RequestParam(required = false) List<String> label,
             @RequestParam(required = false) String image,
-            @RequestParam(required = false) String node
+            @RequestParam(required = false) String node,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String name
     ) {
         var client = clusters.require(cluster);
         return ResourceFilter.apply(
@@ -58,7 +60,9 @@ public class ResourceController {
                 q,
                 label,
                 image,
-                node
+                node,
+                status,
+                name
         );
     }
 

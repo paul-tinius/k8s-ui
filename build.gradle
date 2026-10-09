@@ -13,8 +13,26 @@ java {
     }
 }
 
-repositories {
+ repositories {
+    mavenLocal()
     mavenCentral()
+    // maven {
+    //   url "https://nexus.global.lmco.com/repository/efoss-maven"
+    //   credentials {
+    //     username = "${System.getProperty("wrapperUser") ?: System.getenv("EFOSS_USER")}"
+    //     password = "${System.getProperty("wrapperPassword") ?: System.getenv("EFOSS_TOKEN")}"
+    //   }
+    // }
+    // maven {
+    //     url "https://nexus.us.lmco.com/repository/efoss-maven"
+    //     credentials {
+    //         username = "${System.getProperty("wrapperUser") ?: System.getenv("EFOSS_USER")}"
+    //         password = "${System.getProperty("wrapperPassword") ?: System.getenv("EFOSS_TOKEN")}"
+    //     }
+    // }
+    // maven {
+    //     url "https://nexus-ent-dev.us.lmco.com/repository/maven-central-proxy/"
+    // }
 }
 
 dependencies {
@@ -22,10 +40,15 @@ dependencies {
     implementation libs.spring.boot.starter.web
     implementation libs.spring.boot.starter.actuator
     implementation libs.spring.boot.starter.validation
+    implementation libs.spring.boot.starter.security
+    implementation libs.spring.security.ldap
     implementation libs.fabric8.kubernetes.client
 
     testImplementation platform(libs.spring.boot.dependencies)
     testImplementation libs.spring.boot.starter.test
+    testImplementation libs.spring.security.test
+    testImplementation libs.unboundid.ldapsdk
+    testRuntimeOnly libs.junit.platform.launcher
 }
 
 tasks.withType(JavaCompile).configureEach {

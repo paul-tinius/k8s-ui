@@ -49,11 +49,25 @@ spec:
               value: {{ .Values.dashboard.loadDefaultKubeconfig | quote }}
             - name: DASHBOARD_CLUSTER_DATA_DIR
               value: {{ .Values.dashboard.dataDir | quote }}
-            - name: DASHBOARD_AUTH_TOKEN
+            - name: DASHBOARD_LDAP_ENABLED
+              value: {{ .Values.ldap.enabled | quote }}
+            - name: DASHBOARD_LDAP_HOST
+              value: {{ .Values.ldap.host | quote }}
+            - name: DASHBOARD_LDAP_PORT
+              value: {{ .Values.ldap.port | quote }}
+            - name: DASHBOARD_LDAP_DEFAULT_DOMAIN
+              value: {{ .Values.ldap.defaultDomain | quote }}
+            - name: DASHBOARD_LDAP_SEARCH_BASE_DN
+              value: {{ .Values.ldap.searchBaseDn | quote }}
+            - name: DASHBOARD_LDAP_GROUP
+              value: {{ .Values.ldap.group | quote }}
+            - name: DASHBOARD_LDAP_BIND_USERNAME
+              value: {{ .Values.ldap.bindUsername | quote }}
+            - name: DASHBOARD_LDAP_BIND_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "k8s-dashboard.secretName" . }}
-                  key: {{ .Values.secret.tokenKey }}
+                  key: {{ .Values.secret.ldapBindPasswordKey }}
                   optional: {{ eq (include "k8s-dashboard.managedSecret" .) "false" }}
             - name: XAI_API_KEY
               valueFrom:

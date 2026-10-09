@@ -4,13 +4,20 @@ spring:
   web:
     resources:
       cache:
-        period: 0
+        # Short-lived rather than 0: static assets aren't content-hashed, so a
+        # long max-age could serve a stale app.js/app.css after an upgrade, but
+        # 0 forces a full re-download of both on every single page load.
+        period: 60s
 
 server:
   port: 8080
   shutdown: graceful
   error:
     include-message: always
+  compression:
+    enabled: true
+    mime-types: text/html,text/css,application/javascript,application/json,image/svg+xml
+    min-response-size: 1024
 
 management:
   endpoint:
@@ -27,10 +34,23 @@ management:
       enabled: true
     readinessstate:
       enabled: true
+    # Adding spring-security-ldap pulls in Spring Boot's own LDAP health
+    # indicator, which otherwise defaults to ldap://localhost:389 and reports
+    # DOWN whenever LDAP login is disabled. Only check connectivity when
+    # dashboard.ldap.enabled actually turns LDAP login on.
+    ldap:
+      enabled: ${dashboard.ldap.enabled:false}
 
 dashboard:
-  auth:
-    token: ${DASHBOARD_TOKEN:}
+  ldap:
+    enabled: false
+    host: ""
+    port: 3269
+    default-domain: ""
+    search-base-dn: ""
+    group: ""
+    bind-username: ""
+    bind-password: ""
   cluster:
     demo-enabled: true
     load-default-kubeconfig: true

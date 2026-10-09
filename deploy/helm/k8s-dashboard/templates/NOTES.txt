@@ -19,7 +19,10 @@ Istio hosts:
   http{{ if $.Values.istio.tls.enabled }}s{{ end }}://{{ . }}
 {{- end }}
 {{- end }}
-{{- if and (not .Values.auth.token) (not .Values.secret.existingSecret) }}
+{{- if not .Values.ldap.enabled }}
 
-No access token is set. API routes stay open until you set auth.token or create a Secret named {{ include "k8s-dashboard.secretName" . }} with an optional key {{ .Values.secret.tokenKey | quote }}.
+LDAP login is disabled (ldap.enabled=false). Every route stays open to anyone who can reach the Service.
+{{- else if and (not .Values.ldap.bindPassword) (not .Values.secret.existingSecret) }}
+
+ldap.enabled is true but no bind password is set. Set ldap.bindPassword or create a Secret named {{ include "k8s-dashboard.secretName" . }} with a key {{ .Values.secret.ldapBindPasswordKey | quote }}.
 {{- end }}

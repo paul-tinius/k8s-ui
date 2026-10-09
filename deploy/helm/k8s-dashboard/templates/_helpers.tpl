@@ -57,7 +57,7 @@ app: {{ include "k8s-dashboard.name" . }}
 {{- end -}}
 
 {{- define "k8s-dashboard.managedSecret" -}}
-{{- if and (not .Values.secret.existingSecret) (or .Values.auth.token .Values.ai.apiKey) -}}
+{{- if and (not .Values.secret.existingSecret) (or .Values.ldap.bindPassword .Values.ai.apiKey) -}}
 true
 {{- else -}}
 false

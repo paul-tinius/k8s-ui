@@ -17,18 +17,23 @@ public final class ResourceFilter {
             String query,
             List<String> labels,
             String image,
-            String node
+            String node,
+            String status,
+            String name
     ) {
         String text = normalize(query);
         String imageQuery = normalize(image);
         String nodeQuery = normalize(node);
+        String statusQuery = normalize(status);
+        String nameQuery = normalize(name);
         List<LabelMatch> wanted = parseLabels(labels);
-        if (text.isEmpty() && imageQuery.isEmpty() && nodeQuery.isEmpty() && wanted.isEmpty()) {
+        if (text.isEmpty() && imageQuery.isEmpty() && nodeQuery.isEmpty() && statusQuery.isEmpty()
+                && nameQuery.isEmpty() && wanted.isEmpty()) {
             return items;
         }
         List<ResourceView> matched = new ArrayList<>();
         for (ResourceView item : items) {
-            if (matches(item, text, wanted, imageQuery, nodeQuery)) {
+            if (matches(item, text, wanted, imageQuery, nodeQuery, statusQuery, nameQuery)) {
                 matched.add(item);
             }
         }
@@ -40,12 +45,20 @@ public final class ResourceFilter {
             String text,
             List<LabelMatch> labels,
             String image,
-            String node
+            String node,
+            String status,
+            String name
     ) {
         if (!node.isEmpty() && !normalize(item.node()).contains(node)) {
             return false;
         }
         if (!image.isEmpty() && item.images().stream().noneMatch(value -> normalize(value).contains(image))) {
+            return false;
+        }
+        if (!status.isEmpty() && !normalize(item.status()).contains(status)) {
+            return false;
+        }
+        if (!name.isEmpty() && !normalize(item.name()).contains(name)) {
             return false;
         }
         for (LabelMatch label : labels) {

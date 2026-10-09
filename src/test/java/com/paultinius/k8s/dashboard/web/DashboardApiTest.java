@@ -81,7 +81,7 @@ class DashboardApiTest {
                 .andReturn()
                 .getResponse()
                 .getContentAsString();
-        assertThat(html).contains("Kubernetes Dashboard")
+        assertThat(html).contains("K8S Dashboard")
                 .contains("data-tab=\"management\"")
                 .contains("id=\"detail-collapse\"")
                 .contains("id=\"namespace-collapse\"")
@@ -131,6 +131,19 @@ class DashboardApiTest {
                 .getContentAsString();
         assertThat(mapper.readTree(body).path("lines").findValuesAsText("text"))
                 .anyMatch(line -> line.contains("db.payments.svc:5432"));
+    }
+
+    @Test
+    void containers_storefrontDeployment_listsTheHttpContainer() throws Exception {
+        String body = mockMvc.perform(get("/api/containers")
+                        .param("cluster", "demo")
+                        .param("namespaces", "shop")
+                        .param("deployment", "storefront"))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        assertThat(mapper.readTree(body)).anyMatch(item -> "http".equals(item.asText()));
     }
 
     @Test
